@@ -305,8 +305,8 @@ class _ChatPageState extends State<ChatPage> {
                           context: context,
                           builder: (context) => AlertDialog(
                             title: const Text('确认撤回'),
-                            content: const Text(
-                                '确定要撤回最近一轮对话吗？这将恢复角色到对话前的记忆状态。'),
+                            content:
+                                const Text('确定要撤回最近一轮对话吗？这将恢复角色到对话前的记忆状态。'),
                             actions: [
                               TextButton(
                                 onPressed: () =>
@@ -424,8 +424,13 @@ class _ChatPageState extends State<ChatPage> {
 
   Widget _buildMobileLayout(Contact? selected) {
     return Scaffold(
+      extendBodyBehindAppBar: false,
       appBar: AppBar(
-        title: Text(selected == null ? 'Chat Demo' : selected.name),
+        title: Text(
+          selected == null ? 'Chat Demo' : selected.name,
+          overflow: TextOverflow.ellipsis,
+        ),
+        centerTitle: true,
         leading: Builder(
           builder: (context) => IconButton(
             icon: const Icon(Icons.menu),
@@ -437,6 +442,7 @@ class _ChatPageState extends State<ChatPage> {
         actions: [
           // 移动端菜单按钮
           PopupMenuButton<String>(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
             icon: const Icon(Icons.more_vert),
             tooltip: '更多选项',
             onSelected: (value) async {
@@ -447,8 +453,7 @@ class _ChatPageState extends State<ChatPage> {
                       context: context,
                       builder: (context) => AlertDialog(
                         title: const Text('确认撤回'),
-                        content: const Text(
-                            '确定要撤回最近一轮对话吗？这将恢复角色到对话前的记忆状态。'),
+                        content: const Text('确定要撤回最近一轮对话吗？这将恢复角色到对话前的记忆状态。'),
                         actions: [
                           TextButton(
                             onPressed: () => Navigator.of(context).pop(false),

@@ -59,6 +59,11 @@ class ContactSidebar extends StatelessWidget {
   Widget build(BuildContext context) {
     final selected = _selectedContact;
     final theme = Theme.of(context);
+    // 获取状态栏高度，确保与主页面AppBar对齐
+    final statusBarHeight = MediaQuery.of(context).padding.top;
+    // AppBar默认高度为56，确保标题栏高度一致
+    const appBarHeight = 56.0;
+
     return Container(
       width: 260,
       decoration: BoxDecoration(
@@ -81,9 +86,10 @@ class ContactSidebar extends StatelessWidget {
       ),
       child: Column(
         children: [
-          // 顶部标题栏
+          // 顶部标题栏 - 高度与主页面AppBar对齐
           Container(
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+            height: appBarHeight + statusBarHeight,
+            padding: EdgeInsets.fromLTRB(20, statusBarHeight + 16, 20, 12),
             alignment: Alignment.centerLeft,
             child: Text(
               '对象列表',
