@@ -1,7 +1,7 @@
 name: flutter_chat_demo
 description: Rebuilt chat demo
 publish_to: "none"
-version: 1.3.0+2
+version: 1.7.0+3
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
