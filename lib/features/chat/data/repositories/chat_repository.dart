@@ -11,7 +11,12 @@ class ChatRepository {
   /// 用于直接调用 LLM，如自然语言转 JSON 等功能
   AiService get aiService => _aiService;
 
-  static const String _outputSchema = '''
+  /// LLM输出Schema
+  ///
+  /// 定义LLM应返回的JSON结构，包含：
+  /// - reply: AI的回复内容
+  /// - memoryPatch: 记忆更新补丁，包含知识、事件、物品等
+  static const String outputSchema = '''
 {
   "reply": "给用户的回复",
   "memoryPatch": {
@@ -58,7 +63,7 @@ class ChatRepository {
     final mergedPrompt = composer.composeStructuredOutputPrompt(
       userInput: userMessage.content,
       systemPrompt: systemPrompt,
-      outputSchema: _outputSchema,
+      outputSchema: outputSchema,
     );
 
     final assistantReply = await _aiService.ask(

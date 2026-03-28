@@ -163,7 +163,6 @@ class _ChatPageState extends State<ChatPage> {
         jsonStr,
         category: result.category,
         fallbackName: result.name.isNotEmpty ? result.name : null,
-        fallbackId: result.id.isNotEmpty ? result.id : null,
         fallbackAvatar: result.avatar.isNotEmpty ? result.avatar : null,
         fallbackPersonality:
             result.personality.isNotEmpty ? result.personality : null,
@@ -176,6 +175,13 @@ class _ChatPageState extends State<ChatPage> {
             result.settings?.isNotEmpty == true ? result.settings : null,
         fallbackBackgroundStory:
             result.backgroundStory.isNotEmpty ? result.backgroundStory : null,
+        fallbackNarrativeRules: result.narrativeRules?.isNotEmpty == true
+            ? result.narrativeRules
+            : null,
+        fallbackOtherCharacteristics:
+            result.otherCharacteristics?.isNotEmpty == true
+                ? result.otherCharacteristics
+                : null,
       );
       if (!mounted) return;
 
@@ -199,7 +205,6 @@ class _ChatPageState extends State<ChatPage> {
         result.jsonString!,
         category: result.category,
         fallbackName: result.name.isNotEmpty ? result.name : null,
-        fallbackId: result.id.isNotEmpty ? result.id : null,
         fallbackAvatar: result.avatar.isNotEmpty ? result.avatar : null,
         fallbackPersonality:
             result.personality.isNotEmpty ? result.personality : null,
@@ -212,12 +217,19 @@ class _ChatPageState extends State<ChatPage> {
             result.settings?.isNotEmpty == true ? result.settings : null,
         fallbackBackgroundStory:
             result.backgroundStory.isNotEmpty ? result.backgroundStory : null,
+        fallbackNarrativeRules: result.narrativeRules?.isNotEmpty == true
+            ? result.narrativeRules
+            : null,
+        fallbackOtherCharacteristics:
+            result.otherCharacteristics?.isNotEmpty == true
+                ? result.otherCharacteristics
+                : null,
       );
       if (!mounted) return;
       if (!ok) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(const SnackBar(content: Text('创建失败：JSON 格式错误或 ID 已存在')));
+        ).showSnackBar(const SnackBar(content: Text('创建失败：JSON 格式错误')));
         return;
       }
       ScaffoldMessenger.of(
@@ -226,19 +238,20 @@ class _ChatPageState extends State<ChatPage> {
     } else {
       final ok = await _provider.addContact(
         name: result.name,
-        contactId: result.id,
         avatar: result.avatar,
         personality: result.personality,
         appearance: result.appearance ?? [],
         personalInfo: result.personalInfo ?? [],
         settings: result.settings ?? [],
         backgroundStory: result.backgroundStory,
+        narrativeRules: result.narrativeRules ?? [],
+        otherCharacteristics: result.otherCharacteristics ?? [],
         category: result.category,
       );
       if (!mounted) return;
       if (!ok) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('创建失败：名称/ID 不能为空，且 ID 不能重复')),
+          const SnackBar(content: Text('创建失败：名称不能为空')),
         );
         return;
       }

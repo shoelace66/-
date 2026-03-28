@@ -1,5 +1,3 @@
-import 'dart:math';
-
 enum ContactCategory { story, contact, assistant }
 
 class LruReadyBucket {
@@ -92,6 +90,7 @@ class EventMemory {
     this.process = '',
     this.result = '',
     this.attitude = '',
+    this.sourceDialog = '',
   });
 
   final String time;
@@ -101,6 +100,9 @@ class EventMemory {
   final String process;
   final String result;
   final String attitude;
+
+  /// 原始对话内容（用户输入 + LLM 输出），用于事件总结时提供上下文
+  final String sourceDialog;
 
   bool get isEmpty =>
       time.trim().isEmpty &&
@@ -121,11 +123,12 @@ class EventMemory {
       process: read('process'),
       result: read('result'),
       attitude: read('attitude'),
+      sourceDialog: read('sourceDialog'),
     );
   }
 
   Map<String, dynamic> toJson() {
-    return <String, dynamic>{
+    final json = <String, dynamic>{
       'time': time,
       'location': location,
       'characters': characters,
@@ -134,6 +137,10 @@ class EventMemory {
       'result': result,
       'attitude': attitude,
     };
+    if (sourceDialog.isNotEmpty) {
+      json['sourceDialog'] = sourceDialog;
+    }
+    return json;
   }
 
   String toPromptLine() {
@@ -148,8 +155,17 @@ class EventMemory {
     return seg.join('；');
   }
 
+  /// 生成用于事件总结的详细描述，包含原始对话内容
+  String toSummaryPromptLine() {
+    final base = toPromptLine();
+    if (sourceDialog.trim().isNotEmpty) {
+      return '$base\n【原始对话】\n$sourceDialog';
+    }
+    return base;
+  }
+
   String toSearchableText() {
-    return '$time $location $characters $cause $process $result $attitude';
+    return '$time $location $characters $cause $process $result $attitude $sourceDialog';
   }
 }
 
@@ -183,7 +199,7 @@ class EventLruBucket {
   final Map<String, int> indexByKey;
 
   static String _eventKey(EventMemory e) {
-    return '${e.time}|${e.location}|${e.characters}|${e.cause}|${e.process}|${e.result}|${e.attitude}';
+    return '${e.time}|${e.location}|${e.characters}|${e.cause}|${e.process}|${e.result}|${e.attitude}|${e.sourceDialog}';
   }
 }
 
@@ -407,6 +423,7 @@ class EventGraphMemory {
                   process: n.event.process,
                   result: n.event.result,
                   attitude: n.event.attitude,
+                  sourceDialog: n.event.sourceDialog,
                 ),
                 createdAtMs: n.createdAtMs,
                 summarized: n.summarized,
@@ -424,6 +441,7 @@ class EventGraphMemory {
                   process: n.event.process,
                   result: n.event.result,
                   attitude: n.event.attitude,
+                  sourceDialog: n.event.sourceDialog,
                 ),
                 createdAtMs: n.createdAtMs,
                 summarized: n.summarized,
@@ -441,6 +459,7 @@ class EventGraphMemory {
                   process: n.event.process,
                   result: n.event.result,
                   attitude: n.event.attitude,
+                  sourceDialog: n.event.sourceDialog,
                 ),
                 createdAtMs: n.createdAtMs,
                 summarized: n.summarized,
@@ -647,6 +666,8 @@ class Contact {
     this.personalInfo = const <String>[],
     this.settings = const <Map<String, dynamic>>[],
     this.backgroundStory = const <String>[],
+    this.narrativeRules = const <String>[],
+    this.otherCharacteristics = const <String>[],
     this.worldKnowledge = const WorldKnowledgeBucket.empty(),
     this.selfKnowledge = const SelfKnowledgeBucket.empty(),
     this.userKnowledge = const UserKnowledgeBucket.empty(),
@@ -668,6 +689,8 @@ class Contact {
   final List<String> personalInfo;
   final List<Map<String, dynamic>> settings;
   final List<String> backgroundStory;
+  final List<String> narrativeRules;
+  final List<String> otherCharacteristics;
   final WorldKnowledgeBucket worldKnowledge;
   final SelfKnowledgeBucket selfKnowledge;
   final UserKnowledgeBucket userKnowledge;
@@ -694,6 +717,8 @@ class Contact {
       personalInfo: _readStringList(json['personalInfo']),
       settings: _readSettingsList(json['settings']),
       backgroundStory: _readStringList(json['backgroundStory']),
+      narrativeRules: _readStringList(json['narrativeRules']),
+      otherCharacteristics: _readStringList(json['otherCharacteristics']),
       worldKnowledge:
           WorldKnowledgeBucket(_readStringList(json['worldKnowledge'])),
       selfKnowledge:
@@ -727,6 +752,9 @@ class Contact {
     if (personalInfo.isNotEmpty) json['personalInfo'] = personalInfo;
     if (settings.isNotEmpty) json['settings'] = settings;
     if (backgroundStory.isNotEmpty) json['backgroundStory'] = backgroundStory;
+    if (narrativeRules.isNotEmpty) json['narrativeRules'] = narrativeRules;
+    if (otherCharacteristics.isNotEmpty)
+      json['otherCharacteristics'] = otherCharacteristics;
     if (worldKnowledge.items.isNotEmpty)
       json['worldKnowledge'] = worldKnowledge.items;
     if (selfKnowledge.items.isNotEmpty)
@@ -767,6 +795,8 @@ class Contact {
       personalInfo: List<String>.from(personalInfo),
       settings: settings.map((s) => Map<String, dynamic>.from(s)).toList(),
       backgroundStory: List<String>.from(backgroundStory),
+      narrativeRules: List<String>.from(narrativeRules),
+      otherCharacteristics: List<String>.from(otherCharacteristics),
       worldKnowledge:
           WorldKnowledgeBucket(List<String>.from(worldKnowledge.items)),
       selfKnowledge:
@@ -782,6 +812,7 @@ class Contact {
                 process: e.process,
                 result: e.result,
                 attitude: e.attitude,
+                sourceDialog: e.sourceDialog,
               ))
           .toList()),
       eventGraph: eventGraph.deepCopy(),
@@ -792,43 +823,6 @@ class Contact {
       createdAt: createdAt,
     );
   }
-}
-
-Contact demoContact() {
-  final nowMs = DateTime.now().millisecondsSinceEpoch;
-  return Contact(
-    id: 'demo-1',
-    name: '阿星',
-    avatar: '',
-    personality: const <String>['直接', '理性'],
-    appearance: const <String>['黑色外套'],
-    backgroundStory: const <String>['与用户共同调查旧城区谜案'],
-    worldKnowledge: WorldKnowledgeBucket(const <String>['旧城区夜里常停电']),
-    selfKnowledge: SelfKnowledgeBucket(const <String>['擅长记录线索']),
-    userKnowledge: UserKnowledgeBucket(const <String>['用户喜欢先看证据再下结论']),
-    events: const EventLruBucket.empty(),
-    eventGraph: EventGraphMemory(
-      shortTermQueue: <EventNode>[
-        EventNode(
-          id: 'short-1',
-          tier: EventTier.shortTerm,
-          event: const EventMemory(
-            time: '今晚',
-            location: '旧城区钟楼',
-            characters: '我、你',
-            process: '巡查并记录停电异常',
-          ),
-          createdAtMs: nowMs,
-        ),
-      ],
-    ),
-    belongings: const <String>['手电筒'],
-    status: const <String>['轻微疲劳'],
-    mood: '专注',
-    time: '深夜',
-    category: ContactCategory.contact,
-    createdAt: DateTime.now().subtract(const Duration(days: 1)),
-  );
 }
 
 ContactCategory _contactCategoryFromStorage(String raw) {
@@ -910,22 +904,6 @@ List<KnowledgeNode> _readKnowledgeNodeList(dynamic value) {
     final node = KnowledgeNode.fromJson(_asMap(item));
     if (node.id.trim().isEmpty || node.content.trim().isEmpty) continue;
     out.add(node);
-  }
-  return out;
-}
-
-List<EventEdge> _readEventEdgeList(dynamic value) {
-  if (value is! List) return const <EventEdge>[];
-  final out = <EventEdge>[];
-  final seen = <String>{};
-  for (final item in value) {
-    if (item is! Map) continue;
-    final edge = EventEdge.fromJson(_asMap(item));
-    if (edge.fromNodeId.trim().isEmpty || edge.toNodeId.trim().isEmpty) {
-      continue;
-    }
-    if (!seen.add(edge.toUniqueKey())) continue;
-    out.add(edge);
   }
   return out;
 }

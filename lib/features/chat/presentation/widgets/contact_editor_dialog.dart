@@ -5,26 +5,28 @@ import '../../data/models/contact.dart';
 class ContactDraft {
   const ContactDraft({
     required this.name,
-    required this.id,
     required this.avatar,
     required this.personality,
     this.appearance,
     this.personalInfo,
     this.settings,
     required this.backgroundStory,
+    this.narrativeRules,
+    this.otherCharacteristics,
     required this.category,
     this.jsonString,
     this.naturalLanguage,
   });
 
   final String name;
-  final String id;
   final String avatar;
   final List<String> personality;
   final List<String>? appearance;
   final List<String>? personalInfo;
   final List<Map<String, dynamic>>? settings;
   final List<String> backgroundStory;
+  final List<String>? narrativeRules;
+  final List<String>? otherCharacteristics;
   final ContactCategory category;
   final String? jsonString;
   final String? naturalLanguage;
@@ -42,17 +44,21 @@ class ContactEditorDialog extends StatefulWidget {
 
 class _ContactEditorDialogState extends State<ContactEditorDialog> {
   final TextEditingController _nameCtrl = TextEditingController();
-  final TextEditingController _idCtrl = TextEditingController();
   final TextEditingController _avatarCtrl = TextEditingController();
   final TextEditingController _personalityCtrl = TextEditingController();
   final TextEditingController _appearanceCtrl = TextEditingController();
   final TextEditingController _personalInfoCtrl = TextEditingController();
   final TextEditingController _backgroundCtrl = TextEditingController();
+  final TextEditingController _narrativeRulesCtrl = TextEditingController();
+  final TextEditingController _otherCharacteristicsCtrl =
+      TextEditingController();
 
   final List<String> _personality = <String>[];
   final List<String> _appearance = <String>[];
   final List<String> _personalInfo = <String>[];
   final List<String> _backgroundStory = <String>[];
+  final List<String> _narrativeRules = <String>[];
+  final List<String> _otherCharacteristics = <String>[];
 
   ContactCategory _category = ContactCategory.contact;
   _EditorMode _mode = _EditorMode.normal;
@@ -71,12 +77,13 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
   @override
   void dispose() {
     _nameCtrl.dispose();
-    _idCtrl.dispose();
     _avatarCtrl.dispose();
     _personalityCtrl.dispose();
     _appearanceCtrl.dispose();
     _personalInfoCtrl.dispose();
     _backgroundCtrl.dispose();
+    _narrativeRulesCtrl.dispose();
+    _otherCharacteristicsCtrl.dispose();
     _jsonCtrl.dispose();
     _nlCtrl.dispose();
     _settingKeyCtrl.dispose();
@@ -413,14 +420,6 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
           ),
           const SizedBox(height: 12),
           TextField(
-            controller: _idCtrl,
-            decoration: const InputDecoration(
-              labelText: 'ID',
-              hintText: '唯一标识符，如 character-001',
-            ),
-          ),
-          const SizedBox(height: 12),
-          TextField(
             controller: _avatarCtrl,
             decoration: const InputDecoration(
               labelText: '头像',
@@ -462,9 +461,29 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
             controller: _backgroundCtrl,
           ),
           const SizedBox(height: 16),
+          // 故事类型显示叙事规则编辑器
+          if (_category == ContactCategory.story) ...[
+            _buildArrayEditor(
+              title: '叙事规则',
+              hint: '文风、主题、节奏等，如：暗黑压抑风格、探讨人性主题、快节奏叙事',
+              items: _narrativeRules,
+              controller: _narrativeRulesCtrl,
+            ),
+            const SizedBox(height: 16),
+          ],
           // 故事类型显示 key-value 设定编辑器
           if (_category == ContactCategory.story) ...[
             _buildKeyValueEditor(),
+            const SizedBox(height: 16),
+          ],
+          // 故事类型显示其余特征编辑器
+          if (_category == ContactCategory.story) ...[
+            _buildArrayEditor(
+              title: '其余特征',
+              hint: '角色的其余特点，如：隐藏身份、特殊习惯、内心矛盾等',
+              items: _otherCharacteristics,
+              controller: _otherCharacteristicsCtrl,
+            ),
             const SizedBox(height: 16),
           ],
           Row(
@@ -491,18 +510,24 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
     final example = _category == ContactCategory.story
         ? '''{
   "id": "story-001",
-  "name": "魔法世界",
+  "name": "故事名称",
   "avatar": "🏰",
   "personality": ["奇幻", "冒险"],
-  "backgroundStory": ["一个充满魔法的世界"]
+  "backgroundStory": ["一个充满魔法的世界"],
+  "settings": [
+    {"key": "魔法系统", "value": "基于魔法石的能量体系", "relate": ["魔法石", "能量"]}
+  ],
+  "narrativeRules": ["使用第三人称视角", "注重环境描写"],
+  "otherCharacteristics": ["慢热型节奏", "友情与牺牲主题"]
 }'''
         : '''{
   "id": "character-001",
-  "name": "阿星",
+  "name": "角色名称",
   "avatar": "⭐",
   "personality": ["理性", "冷静"],
   "appearance": ["黑色外套", "短发"],
-  "backgroundStory": ["资深侦探"]
+  "personalInfo": ["职业：侦探", "年龄：28岁"],
+  "backgroundStory": ["背景故事"]
 }''';
     if (_jsonCtrl.text.isEmpty) {
       _jsonCtrl.text = example;
@@ -572,7 +597,7 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
   Widget _buildNaturalLanguageForm() {
     final example = _category == ContactCategory.story
         ? '创建一个魔法世界的故事，包含魔法师、魔法石等元素'
-        : '创建一个名叫阿星的侦探，性格理性冷静，穿着黑色外套';
+        : '创建一个名叫小明的侦探，性格理性冷静，穿着黑色外套';
     if (_nlCtrl.text.isEmpty) {
       _nlCtrl.text = example;
     }
@@ -668,12 +693,11 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
 
   void _saveNormalMode() {
     final name = _nameCtrl.text.trim();
-    final id = _idCtrl.text.trim();
     final avatar = _avatarCtrl.text.trim();
 
-    if (name.isEmpty || id.isEmpty) {
+    if (name.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('名称和 ID 不能为空')),
+        const SnackBar(content: Text('名称不能为空')),
       );
       return;
     }
@@ -693,7 +717,6 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
     Navigator.of(context).pop(
       ContactDraft(
         name: name,
-        id: id,
         avatar: avatar,
         personality: List<String>.from(_personality),
         appearance: _category == ContactCategory.contact
@@ -704,6 +727,12 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
             : null,
         settings: settings,
         backgroundStory: List<String>.from(_backgroundStory),
+        narrativeRules: _category == ContactCategory.story
+            ? List<String>.from(_narrativeRules)
+            : null,
+        otherCharacteristics: _category == ContactCategory.story
+            ? List<String>.from(_otherCharacteristics)
+            : null,
         category: _category,
       ),
     );
@@ -720,7 +749,6 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
     Navigator.of(context).pop(
       ContactDraft(
         name: _nameCtrl.text.trim(),
-        id: _idCtrl.text.trim(),
         avatar: _avatarCtrl.text.trim(),
         personality: List<String>.from(_personality),
         appearance: List<String>.from(_appearance),
@@ -733,6 +761,12 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
                 })
             .toList(),
         backgroundStory: List<String>.from(_backgroundStory),
+        narrativeRules: _category == ContactCategory.story
+            ? List<String>.from(_narrativeRules)
+            : null,
+        otherCharacteristics: _category == ContactCategory.story
+            ? List<String>.from(_otherCharacteristics)
+            : null,
         category: _category,
         jsonString: jsonStr,
       ),
@@ -750,7 +784,6 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
     Navigator.of(context).pop(
       ContactDraft(
         name: _nameCtrl.text.trim(),
-        id: _idCtrl.text.trim(),
         avatar: _avatarCtrl.text.trim(),
         personality: List<String>.from(_personality),
         appearance: List<String>.from(_appearance),
@@ -763,6 +796,12 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
                 })
             .toList(),
         backgroundStory: List<String>.from(_backgroundStory),
+        narrativeRules: _category == ContactCategory.story
+            ? List<String>.from(_narrativeRules)
+            : null,
+        otherCharacteristics: _category == ContactCategory.story
+            ? List<String>.from(_otherCharacteristics)
+            : null,
         category: _category,
         naturalLanguage: nlText,
       ),
