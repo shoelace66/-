@@ -225,6 +225,14 @@ flutter build apk --release
 # 产物：build/app/outputs/flutter-apk/app-release.apk
 ```
 
+## 下载
+
+预编译的 release APK 不入库(避免仓库膨胀),在 GitHub Releases 分发:
+
+👉 **[Releases 页面](https://github.com/shoelace66/ai_roleplay_chat/releases)** — 下载 `app-release.apk` 后直接安装。
+
+> 如果从旧版本升级,建议先在 App 内导出联系人/消息 JSON(设置 → 导出),再装新 APK 导入,避免 SharedPreferences schema 升级时丢数据。
+
 ## 依赖
 
 - `http: ^1.2.2` — LLM / opencode HTTP 客户端

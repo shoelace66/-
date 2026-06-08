@@ -78,6 +78,12 @@ yarn-error.log
 .flutter-plugins-dependencies
 .pub/
 
+# APK builds (产物不入库,通过 GitHub Releases 分发)
+*.apk
+!releases/.gitkeep
+apk_extract/
+apk_temp_extract/
+
 # Dart
 .dart_tool/
 
