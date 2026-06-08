@@ -2,17 +2,15 @@ import '../../features/chat/data/models/contact.dart';
 import '../data/models/app_settings.dart';
 
 class StructuredInputPromptComposer {
-  final AppSettings settings;
-
   StructuredInputPromptComposer({this.settings = const AppSettings()});
+
+  final AppSettings settings;
 
   int get _maxPromptListItems => settings.maxPromptListItems;
   int get _maxPromptLineLength => settings.maxPromptLineLength;
-  int get _maxEdgeLines => settings.maxEdgeLines;
   int get _maxShortTermEvents => settings.maxShortTermEvents;
   int get _maxLongTermEvents => settings.maxLongTermEvents;
   int get _maxUltraTermEvents => settings.maxUltraTermEvents;
-  int get _maxRelatedEvents => settings.maxRelatedEvents;
 
   String _clip(String value) {
     final v = value.trim();
@@ -21,272 +19,188 @@ class StructuredInputPromptComposer {
     return v.substring(0, _maxPromptLineLength);
   }
 
-  void _writeStringList(
-    StringBuffer buffer,
-    String title,
-    List<String> items, {
-    bool clip = true,
-  }) {
-    if (items.isEmpty) return;
+  void _writeStringList(StringBuffer buffer, String title, List<String> items) {
+    final normalized = items.map(_clip).where((e) => e.isNotEmpty).toList();
+    if (normalized.isEmpty) return;
     buffer.writeln('### $title');
-    for (final item in items.take(_maxPromptListItems)) {
-      final clipped = clip ? _clip(item) : item.trim();
-      if (clipped.isEmpty) continue;
-      buffer.writeln(' - $clipped');
+    for (final item in normalized.take(_maxPromptListItems)) {
+      buffer.writeln('- $item');
     }
     buffer.writeln();
   }
 
-  void _writeEventNodes(StringBuffer buffer, List<EventNode> nodes) {
+  /// 写入事件节点，带编号（用于 LLM 关联）
+  int _writeEventNodes(
+      StringBuffer buffer, List<EventNode> nodes, int startIdx) {
     if (nodes.isEmpty) {
-      buffer.writeln(' - （无）');
-      return;
+      buffer.writeln('- (none)');
+      return startIdx;
     }
-    for (final node in nodes) {
-      final state = node.summarized ? '已总结' : '未总结';
+    for (int i = 0; i < nodes.length; i++) {
+      final node = nodes[i];
+      final state = node.summarized ? 'summarized' : 'active';
       final line = _clip(node.event.toPromptLine());
-      buffer.writeln(' - [$state]${line.isEmpty ? "（空）" : line}');
+      buffer.writeln(
+          '- [${startIdx + i}] [$state] ${line.isEmpty ? "(empty)" : line}');
     }
+    return startIdx + nodes.length;
   }
 
   void _writeEventMemories(StringBuffer buffer, List<EventMemory> events) {
     if (events.isEmpty) {
-      buffer.writeln(' - （无）');
+      buffer.writeln('- (none)');
       return;
     }
-    for (final event in events) {
+    for (final event in events.take(_maxPromptListItems)) {
       final line = _clip(event.toPromptLine());
       if (line.isEmpty) continue;
-      buffer.writeln(' - [联想]$line');
+      buffer.writeln('- $line');
     }
   }
 
-  void _writeEventMemorySections(StringBuffer buffer, Contact contact) {
+  void _writeMemorySection(StringBuffer buffer, Contact contact) {
+    _writeStringList(buffer, '世界/背景知识', contact.worldKnowledge.items);
+    _writeStringList(buffer, '自我认知', contact.selfKnowledge.items);
+    _writeStringList(buffer, '用户认知', contact.userKnowledge.items);
+
     final short =
         contact.eventGraph.shortTermQueue.take(_maxShortTermEvents).toList();
     final long =
         contact.eventGraph.longTermQueue.take(_maxLongTermEvents).toList();
-    final history = contact.eventGraph.ultraLongTermQueue
+    final ultra = contact.eventGraph.ultraLongTermQueue
         .take(_maxUltraTermEvents)
         .toList();
 
-    final inGraphKeys = <String>{
-      ...short.map((e) => e.event.toPromptLine().trim()),
-      ...long.map((e) => e.event.toPromptLine().trim()),
-      ...history.map((e) => e.event.toPromptLine().trim()),
-    };
-
-    final related = <EventMemory>[];
-    final seenRelated = <String>{};
-    for (final event in contact.events.items) {
-      final key = event.toPromptLine().trim();
-      if (key.isEmpty || inGraphKeys.contains(key)) continue;
-      if (!seenRelated.add(key)) continue;
-      related.add(event);
-      if (related.length >= _maxRelatedEvents) break;
-    }
-
-    buffer.writeln('## 事件记忆');
-    buffer.writeln('短期事件：');
-    _writeEventNodes(buffer, short);
-    buffer.writeln('长期总结：');
-    _writeEventNodes(buffer, long);
-    buffer.writeln('历史事件：');
-    _writeEventNodes(buffer, history);
-    buffer.writeln('关联事件：');
-    _writeEventMemories(buffer, related);
+    buffer.writeln('### 事件记忆（编号用于 relatedEventIds 关联）');
+    buffer.writeln('短期事件:');
+    var idx = _writeEventNodes(buffer, short, 0);
+    buffer.writeln('长期总结:');
+    idx = _writeEventNodes(buffer, long, idx);
+    buffer.writeln('历史事件:');
+    _writeEventNodes(buffer, ultra, idx);
     buffer.writeln();
   }
 
-  void _writeEdgeSections(StringBuffer buffer, Contact contact) {
-    final allNodes = <EventNode>[
-      ...contact.eventGraph.shortTermQueue,
-      ...contact.eventGraph.longTermQueue,
-      ...contact.eventGraph.ultraLongTermQueue,
-    ];
-    final idToNode = <String, EventNode>{
-      for (final node in allNodes) node.id: node
-    };
+  void _writeStateSection(StringBuffer buffer, Contact contact) {
+    final states = <String, String>{...contact.currentStates};
 
-    final eventEdges = contact.eventGraph.edges.values
-        .where((edge) => idToNode.containsKey(edge.fromNodeId))
-        .where((edge) => idToNode.containsKey(edge.toNodeId))
-        .take(_maxEdgeLines)
-        .toList();
-
-    buffer.writeln('## 关系边');
-    buffer.writeln('相关事件：');
-    if (eventEdges.isEmpty) {
-      buffer.writeln(' - （无）');
-    } else {
-      for (final edge in eventEdges) {
-        final from = idToNode[edge.fromNodeId]!;
-        final to = idToNode[edge.toNodeId]!;
-        final fromLine = _clip(from.event.toPromptLine());
-        final toLine = _clip(to.event.toPromptLine());
-        buffer.writeln(
-          ' - ${fromLine.isEmpty ? "（空）" : fromLine} -> ${toLine.isEmpty ? "（空）" : toLine}',
-        );
-      }
+    for (final item in contact.status) {
+      final key = item.trim();
+      if (key.isNotEmpty) states.putIfAbsent(key, () => '');
+    }
+    if (contact.mood.trim().isNotEmpty) {
+      states.putIfAbsent('mood', () => contact.mood.trim());
+    }
+    if (contact.time.trim().isNotEmpty) {
+      states.putIfAbsent('time', () => contact.time.trim());
     }
 
-    buffer.writeln('物品相关事件：');
-    final lines = <String>[];
-    contact.eventGraph.belongingEventQueues.forEach((belonging, queue) {
-      if (lines.length >= _maxEdgeLines) return;
-      final clippedBelonging = _clip(belonging);
-      if (clippedBelonging.isEmpty) return;
-      for (final eventId in queue.reversed) {
-        if (lines.length >= _maxEdgeLines) break;
-        final node = idToNode[eventId];
-        if (node == null) continue;
-        final line = _clip(node.event.toPromptLine());
-        lines.add('$clippedBelonging -> ${line.isEmpty ? "（空）" : line}');
-      }
-    });
-    if (lines.isEmpty) {
-      buffer.writeln(' - （无）');
-    } else {
-      for (final line in lines) {
-        buffer.writeln(' - $line');
-      }
+    if (states.isEmpty) {
+      buffer.writeln('- (none)');
+      return;
     }
-    buffer.writeln();
+
+    for (final entry in states.entries.take(_maxPromptListItems)) {
+      final key = _clip(entry.key);
+      final value = _clip(entry.value);
+      if (key.isEmpty) continue;
+      buffer.writeln('$key: ${value.isEmpty ? "(empty)" : value}');
+    }
   }
 
-  String _buildNarrativeRules(Contact contact) {
-    if (contact.narrativeRules.isEmpty) return '';
+  String _buildContactPrompt(
+    Contact contact, {
+    bool needSummary = false,
+    List<EventMemory> pendingSummaryEvents = const [],
+  }) {
     final buffer = StringBuffer();
-    buffer.writeln('## 叙事规则');
-    for (final rule in contact.narrativeRules.take(_maxPromptListItems)) {
-      final trimmed = rule.trim();
-      if (trimmed.isEmpty) continue;
-      buffer.writeln(' - $trimmed');
+
+    buffer.writeln('## 固定输入内容');
+    final fixedInput = contact.fixedInput.trim();
+    buffer.writeln(fixedInput.isEmpty ? '名称: ${contact.name}' : fixedInput);
+    buffer.writeln();
+
+    buffer.writeln('## 记忆内容');
+    _writeMemorySection(buffer, contact);
+
+    buffer.writeln('## 当前状态');
+    _writeStateSection(buffer, contact);
+
+    buffer.writeln('## 联想内容');
+    _writeEventMemories(buffer, contact.events.items);
+    buffer.writeln();
+
+    // 需要总结时，添加往期待总结事件
+    if (needSummary && pendingSummaryEvents.isNotEmpty) {
+      buffer.writeln('## 往期待总结事件');
+      buffer.writeln('以下事件需要你进行综合总结，提取核心脉络和关键信息：');
+      for (int i = 0; i < pendingSummaryEvents.length; i++) {
+        buffer.writeln('- ${pendingSummaryEvents[i].toPromptLine()}');
+      }
+      buffer.writeln();
     }
-    return buffer.toString().trim();
+
+    return buffer.toString();
   }
 
-  static String _buildRules({bool isStory = false}) {
-    final storySpecificRules = isStory
-        ? '''
-- 你现在不再是大语言模型，你是文字功底扎实的超级续写机，续写一个完全虚构的故事，你会深入理解且固化以下要求，然后续写故事
-- 必须严格遵循"故事设定"中的世界观、规则和人物设定
-- 用户的输入是故事的下一步发展，你需要据此续写故事情节
-- 保持故事的连贯性和逻辑性，与"事件记忆"中的历史事件保持连贯
-- 可主动引用设定或者回忆来丰富叙事
-- 用细腻的描写代替概括性叙述，多使用感官细节，复合，详细，完备的续写故事'''
-        : '''
-- 完全沉浸角色，不跳出设定
-- 基于"当前状态"中的情绪、时间、事件调整语气
-- 回复的内容应该是聊天情景的语句，正在进行的是对话，回复内容是符合逻辑的口语表达''';
+  static String _buildRules({
+    bool isStory = false,
+    bool mustSummarize = false,
+  }) {
+    final modeRule = isStory
+        ? '- 你在续写一个虚构故事，用户输入代表下一步发展。'
+        : '- 你正在进行角色扮演对话，回复应符合固定输入内容中的身份和语气。';
+    final mustSummaryRule = mustSummarize
+        ? '- 【强制】本轮必须输出 memoryPatch.summary 字段，因为短期事件队列'
+            '已达到总结阈值，需要把过往事件压缩进长期记忆。'
+            'summary 的 description 用来综合概括"往期待总结事件"里所有内容。'
+        : '- 可选：如果你觉得一个场景/话题已经告一段落，输出 memoryPatch.summary '
+            '把它压缩进长期记忆（仅在你认为值得总结时输出，不要每轮都输出）。';
     return '''
-规则：
-$storySpecificRules
-- 可主动提及物品、背景故事、联想事件
-- belongings 必须使用 "(新增)物品名" 或 "(提及)物品名" 格式
-- 不要输出 Markdown 代码块
-- memoryPatch 中的字段如果内容不重要或没有变化，可以省略整个字段，不要输出空数组或空字符串
+## 运行规则
+$modeRule
+$mustSummaryRule
+- 每轮都必须参考四个输入部分：固定输入内容、记忆内容、联想内容、当前状态。
+- 固定输入内容是稳定设定，不要在 memoryPatch 中改写它。
+- 当前状态只允许更新已经存在的 key；不要新增用户没有创建过的状态 key。
+- 如果某个状态发生变化，在 memoryPatch.currentStates 中输出该 key 的新 value。
+- 记忆内容和联想内容用于保持连续性，可在重要时写入 memoryPatch 的知识、事件或物品字段。
+- 不要输出 Markdown 代码块。
 ''';
   }
 
   static String _buildJsonFormat({bool isStory = false}) {
     final typeLabel = isStory ? '故事' : '角色';
-    return '''必须输出合法 JSON，且仅包含以下结构：
+
+    return '''
+必须输出合法 JSON，且仅包含以下结构：
 {
-  "reply": "$typeLabel回复内容，符合设定",
+  "reply": "$typeLabel回复内容",
   "memoryPatch": {
-    "worldKnowledge": ["新增的世界观知识，重要才输出，否则省略整个字段"],
-    "selfKnowledge": ["新增的自我认知，重要才输出，否则省略整个字段"],
-    "userKnowledge": ["新增的对用户了解，重要才输出，否则省略整个字段"],
-    "events": [{"time":"","location":"","characters":"","cause":"","process":"","result":"","attitude":""}],
-    "belongings": ["(新增)物品名","(提及)物品名，重要才输出，否则省略整个字段"],
-    "status": ["状态变化，重要才输出，否则省略整个字段"],
-    "mood": "当前情绪，重要才输出，否则省略整个字段",
-    "time": "当前时间，重要才输出，否则省略整个字段"
+    "worldKnowledge": ["重要的新世界/背景知识，可省略"],
+    "selfKnowledge": ["重要的新自我认知，可省略"],
+    "userKnowledge": ["重要的新用户认知，可省略"],
+    "summary": {"description": "往期事件的综合总结，300字以内。可选输出（仅在场景/话题结束或本轮要求时输出）", "keywords": ["总结关键词1", "总结关键词2"]},
+    "eventBrief": {"description": "本次事件的缩写概述，300字以内", "keywords": ["实体关键词1"], "theme": ["主题/氛围1"]},
+    "relatedEventIds": [0, 3],
+    "belongings": ["(新增)物品名", "(提及)物品名"],
+    "currentStates": {"用户创建的状态key": "新的状态value"}
   }
 }
 
-【输出要求】
+输出要求：
 1. 必须输出 JSON，不要包含额外说明。
-2. 输出必须严格遵循以上 schema。
-3. JSON 必须可直接解析，不要包含 Markdown 代码块标记。''';
-  }
-
-  String _buildRoleplayPrompt(Contact contact) {
-    final buffer = StringBuffer();
-    final isStory = contact.category == ContactCategory.story;
-
-    buffer.writeln('## 基础信息');
-    if (isStory) {
-      buffer.writeln(' - 故事名称: ${contact.name}');
-    } else {
-      buffer.writeln(' - 姓名: ${contact.name}');
-    }
-    if (contact.avatar.isNotEmpty) {
-      buffer.writeln(' - 头像: ${contact.avatar}');
-    }
-    buffer.writeln();
-
-    buffer.writeln(isStory ? '## 故事设定' : '## 角色设定');
-    if (isStory) {
-      _writeStringList(buffer, '风格', contact.personality, clip: false);
-      if (contact.settings.isNotEmpty) {
-        buffer.writeln('### 设定');
-        for (final setting in contact.settings) {
-          final key = setting['key'] as String? ?? '';
-          final value = setting['value'] as String? ?? '';
-          final relate = setting['relate'] as List<String>? ?? [];
-          if (key.isEmpty || value.isEmpty) continue;
-          buffer.writeln(' - $key: $value');
-          if (relate.isNotEmpty) {
-            buffer.writeln('   关联: ${relate.join(' ')}');
-          }
-        }
-        buffer.writeln();
-      }
-    } else {
-      _writeStringList(buffer, '外貌特征', contact.appearance, clip: false);
-      _writeStringList(buffer, '性格特点', contact.personality, clip: false);
-      _writeStringList(buffer, '个人信息', contact.personalInfo, clip: false);
-    }
-    _writeStringList(buffer, '背景故事', contact.backgroundStory, clip: false);
-
-    _writeStringList(buffer, '其余特征', contact.otherCharacteristics, clip: false);
-
-    buffer.writeln('## 知识储备');
-    _writeStringList(buffer, '世界观知识', contact.worldKnowledge.items,
-        clip: false);
-    _writeStringList(buffer, '自我认知', contact.selfKnowledge.items, clip: false);
-    _writeStringList(buffer, '对用户的了解', contact.userKnowledge.items,
-        clip: false);
-
-    if (contact.belongings.isNotEmpty) {
-      buffer.writeln('## 物品持有');
-      for (final item in contact.belongings.take(_maxPromptListItems)) {
-        final trimmed = item.trim();
-        if (trimmed.isEmpty) continue;
-        buffer.writeln(' - $trimmed');
-      }
-      buffer.writeln();
-    }
-
-    _writeEventMemorySections(buffer, contact);
-    _writeEdgeSections(buffer, contact);
-
-    buffer.writeln('## 当前状态');
-    _writeStringList(buffer, '身体状态', contact.status, clip: false);
-    if (contact.mood.isNotEmpty) {
-      buffer.writeln('### 情绪状态');
-      buffer.writeln(' - ${contact.mood.trim()}');
-      buffer.writeln();
-    }
-    if (contact.time.isNotEmpty) {
-      buffer.writeln('### 当前时间');
-      buffer.writeln(' - ${contact.time.trim()}');
-      buffer.writeln();
-    }
-
-    return buffer.toString();
+2. 字段无变化时可以省略整个字段。
+3. currentStates 只能包含输入中"当前状态"已有的 key。
+4. keywords 是实体关键词：包含人物、地点、物品等具体实体，支持不同粒度共存（如"伞"和"花伞"）。应包含文段中出现的以及通过上下文/记忆可推断的内容。
+5. theme 是主题/氛围关键词：包含情感、氛围、主题等抽象概念（如"遗憾"、"温暖"、"悬疑"、"紧张"、"浪漫"）。
+6. relatedEventIds（严格控制）：仅当本次事件与某个往期事件存在**非常强的因果链**（A 直接导致/促成 B）或**高度相似的主题重复**时，才输出对应编号。
+   - **宁缺毋滥**：没有把握时直接省略整个字段，不要为追求"看起来全"而硬连。
+   - **上限 2 个**：本轮事件**最多**关联 2 个往期事件，超过就属于无意义堆砌。
+   - **不要连环关联**：不能因为 A 与 B 有关、B 与 C 有关，就把 A→B→C 都列上；只列与"本次事件"直接相关的那一段。
+   - 编号见"事件记忆"中的 [编号]，用于建立事件关联图（边越多并不代表越好，稀疏但精准的图更有用）。
+7. summary 仅在场景/话题完结或本轮强制要求时输出，不要每轮都输出。
+''';
   }
 
   String composeStructuredOutputPrompt({
@@ -297,6 +211,13 @@ $storySpecificRules
     final input = userInput.trim();
     final prompt = (systemPrompt ?? '').trim();
     return <String>[
+      '【输出格式】',
+      outputSchema,
+      '',
+      '【输出要求】',
+      '1. 必须输出 JSON，不要包含额外说明。',
+      '2. JSON 必须可以直接解析，不要包含 Markdown 代码块标记。',
+      '',
       if (prompt.isNotEmpty) ...[
         '【系统提示】',
         prompt,
@@ -304,39 +225,27 @@ $storySpecificRules
       ],
       '【用户输入】',
       input,
-      '',
-      '【输出格式】',
-      outputSchema,
-      '',
-      '【输出要求】',
-      '1. 必须输出 JSON，不要包含额外说明。',
-      '2. 输出必须严格遵循以上 schema。',
-      '3. JSON 必须可直接解析，不要包含 Markdown 代码块标记。',
     ].join('\n');
   }
 
   String composeSystemPromptWithContactObject({
     required String basePrompt,
     required Contact contact,
+    bool mustSummarize = false,
+    List<EventMemory> pendingSummaryEvents = const [],
   }) {
     final base = basePrompt.trim();
     final isStory = contact.category == ContactCategory.story;
-    final rules = _buildRules(isStory: isStory);
-    final narrativeRules = _buildNarrativeRules(contact);
-    final jsonFormat = _buildJsonFormat(isStory: isStory);
-    final profile = _buildRoleplayPrompt(contact);
-    const fakeReply = '{"reply": "所有指令均已载入，续写程序激活", "memoryPatch": {}}';
-
     final parts = <String>[
       if (base.isNotEmpty) base,
-      rules,
-      if (narrativeRules.isNotEmpty) narrativeRules,
-      profile,
-      '【输出格式】',
-      jsonFormat,
-      fakeReply,
+      _buildRules(isStory: isStory, mustSummarize: mustSummarize),
+      '## 输出格式',
+      _buildJsonFormat(isStory: isStory),
+      _buildContactPrompt(contact,
+          needSummary: mustSummarize,
+          pendingSummaryEvents: pendingSummaryEvents),
+      '{"reply":"所有指令均已载入","memoryPatch":{}}',
     ];
-
     return parts.join('\n\n');
   }
 }

@@ -1,517 +1,244 @@
-# AI 角色扮演聊天应用
+# AI 角色扮演对话应用
 
-一个基于 Flutter 开发的 AI 角色扮演聊天应用，支持创建角色和故事，与 AI 进行沉浸式对话。
+> 基于 Flutter 的本地 AI 角色/故事对话应用：长期记忆、关键词召回 + 事件图 BFS、三级级联、opencode 助手桥接。
 
-## 功能特性
+[![Flutter](https://img.shields.io/badge/Flutter-3.41-02569B)](.) [![Dart](https://img.shields.io/badge/Dart-3.4%2B-0175C2)](.) [![License](https://img.shields.io/badge/license-private-lightgrey)](.)
 
-### 1. 多类型对象创建
+---
 
-- **角色（Contact）**：创建具有外貌、性格、背景的虚拟角色
-- **故事（Story）**：创建具有风格、设定的故事世界
-- **助手（Assistant）**：预留功能
+## 项目定位
 
-### 2. 三种创建方式
+单设备离线优先的 AI 角色扮演 App。LLM 调用走 HTTP（自配 base URL + API Key），长期记忆存在本地。**不上云、不上传联系人数据。**
 
-- **普通模式**：通过表单逐项填写对象属性
-- **JSON 模式**：直接输入 JSON 格式定义对象
-- **自然语言模式**：用自然语言描述，AI 自动生成对象
+> 📐 想看完整架构与数据流图：见 [docs/architecture.html](docs/architecture.html)（含 mermaid 流程图、状态机、数据存储布局、参数对照表）。
 
-### 3. 数组项编辑器
+## 三种联系人
 
-- 支持逐项添加、编辑、删除对象属性
-- 使用 Chip 组件展示已添加的条目
-- 点击 Chip 可编辑，点击删除图标可移除
+| 类型 | category | 引擎 | 走哪条路径 |
+|---|---|---|---|
+| **角色** | `ContactCategory.contact` | LLM + 结构化记忆 | `sendMessage` → `AiService` → 事件图 |
+| **故事** | `ContactCategory.story` | LLM + 结构化记忆（schema 略不同） | 同上，`_buildJsonFormat(isStory: true)` |
+| **助手** | `ContactCategory.assistant` | opencode 桥接 | `_sendAssistantMessage` → `OpencodeService` |
 
-### 4. 对话功能
+## 核心能力
 
-- 与 AI 角色进行沉浸式对话
-- 支持移动端和桌面端自适应布局
-- 左侧栏显示对象列表，支持快速切换
-
-### 5. 长期记忆系统
-
-#### 5.1 记忆存储架构
-
-**三层级事件存储（Event Graph）**：
-
-| 层级 | 容量 | 特点 | 用途 |
-|------|------|------|------|
-| **短期队列** | 2000条 | 原始事件，详细记录 | 存储最近发生的具体事件 |
-| **长期队列** | 500条 | 总结事件，压缩信息 | 存储短期事件的摘要总结 |
-| **超长期队列** | 200条 | 历史事件，高度概括 | 存储长期历史的重要节点 |
-
-**知识库分类**：
-- **世界观知识（World Knowledge）**：故事世界的规则、背景、常识
-- **自我认知（Self Knowledge）**：角色对自己的了解和认知
-- **用户认知（User Knowledge）**：角色对用户的了解和记忆
-
-**关联系统**：
-- **物品关联（Belongings）**：物品与相关事件的关联图谱
-- **设定关联（Settings）**：故事设定与相关事件的关联图谱
-- **事件关联（Edges）**：事件之间的因果关系和时序关系
-
-#### 5.2 记忆调取机制详解
-
-当用户输入消息时，系统会执行以下记忆调取流程：
-
-**步骤1：关键词提取**
-```dart
-// 从用户输入中提取关键词
-keywords = extractKeywords(userInput)
-// 提取规则：中文字符、英文字母、数字、下划线，长度>=2
-```
-
-**步骤2：事件评分计算**
-
-对于每个存储的事件，计算综合相关度分数：
-
-```
-综合分数 = 关键词匹配分数 × (关键词权重/100) + 语义相似度分数 × (语义权重/100)
-```
-
-**默认权重配置**：
-- 关键词匹配权重：60%
-- 语义相似度权重：40%
-- 权重可在应用设置中调整
-
-**关键词匹配分数**：
-- 计算用户输入关键词与事件文本的关键词交集数量
-- 匹配越多，分数越高
-
-**语义相似度分数**：
-- 使用 Jaccard 相似度算法
-- 计算两个文本集合的交集与并集比例
-- 公式：`相似度 = 交集大小 / 并集大小`
-
-**步骤3：多级检索策略**
-
-系统采用三级检索策略，逐步扩充相关记忆：
-
-**第一级：直接事件匹配**
-- 遍历所有事件（短期/长期/超长期）
-- 按综合分数排序
-- 选取Top-N最相关的事件
-
-**第二级：物品关联检索**
-- 搜索与用户输入语义相关的物品（Belongings）
-- 查找与该物品关联的历史事件
-- 例如：查询"手电筒"会联想到"夜间探索"相关事件
-
-**第三级：设定关联检索**
-- 搜索与用户输入语义相关的故事设定（Settings）
-- 查找与该设定关联的历史事件
-- 例如：查询"魔法规则"会联想到"施法事件"
-
-**步骤4：结果排序与去重**
-- 按相关度分数降序排列
-- 分数相同则按时间戳降序（最新的优先）
-- 确保返回的事件不重复
-- 限制返回数量（默认最多5个）
-
-#### 5.3 Prompt 组装流程
-
-最终，系统会将调取的记忆组装成结构化 Prompt 输入给 LLM：
-
-```
-## 基础信息
-- 姓名/故事名称: [对象名称]
-
-## 角色设定/故事设定
-[外貌、性格、背景等信息]
-
-## 知识储备
-[世界观知识、自我认知、用户认知]
-
-## 物品持有
-[相关物品列表]
-
-## 事件记忆
-短期事件：
-- [事件1]
-- [事件2]
-...
-
-长期总结：
-- [总结1]
-...
-
-历史事件：
-- [历史1]
-...
-
-关联事件：
-- [联想事件1]
-...
-
-## 关系边
-[事件之间的关联关系]
-
-## 当前状态
-[身体状态、情绪状态、当前时间]
-```
-
-#### 5.4 记忆更新与LRU管理机制
-
-每次对话后，AI 会返回记忆补丁（memoryPatch），系统会据此更新记忆，并应用LRU（最近最少使用）管理机制。
-
-**记忆补丁格式：**
-```dart
-memoryPatch: {
-  "worldKnowledge": ["新增的世界观知识"],
-  "selfKnowledge": ["新增的自我认知"],
-  "userKnowledge": ["新增的对用户了解"],
-  "events": [{"time":"","location":"",...}],
-  "belongings": ["(新增)物品名", "(提及)物品名"],
-  "status": ["状态变化"],
-  "mood": "当前情绪",
-  "time": "当前时间"
-}
-```
-
-**事件队列的LRU管理：**
-
-事件队列采用**分层LRU**策略：
-
-| 层级 | 固定输入LLM | LRU管理部分 | 总容量 |
-|------|------------|------------|--------|
-| **短期队列** | 前10条 | 第11条及以后 | 2000条 |
-| **长期队列** | 前5条 | 第6条及以后 | 500条 |
-| **超长期队列** | 前2条 | 第3条及以后 | 200条 |
-
-**LRU排序规则**（针对不输入LLM的部分）：
-1. **与当前用户输入关键词匹配的事件**（权重100）
-2. **与关键词匹配事件有关联的事件**（权重50）
-3. **与关键词相关belonging有关联的事件**（权重30）
-4. **普通belonging关联的事件**（权重10）
-5. **其他事件按时间倒序**（新的在前）
-
-**Belongings队列的LRU管理（全局）：**
-
-每个物品的关联事件队列**全部应用LRU**（无固定部分）：
-
-- **LRU排序规则**：
-  1. 与当前用户输入关键词匹配的事件排在前面（权重100）
-  2. 其他事件按时间倒序（新的在前）
-
-- **容量限制**：每个物品最多保留100个最相关的事件
-- **淘汰机制**：当队列超过100时，移除相关性最低的事件
-
-**Settings队列的LRU管理（全局）：**
-
-与Belongings相同，每个设定的关联事件队列**全部应用LRU**。
-
-**系统更新流程：**
-1. 将新事件加入短期队列头部
-2. 对事件队列应用LRU排序（仅本地存储部分）
-3. 更新Belongings关联并应用LRU排序
-4. 更新Settings关联并应用LRU排序
-5. 触发事件总结（当短期队列超过阈值时）
-6. 持久化更新后的联系人
-
-### 6. 应用设置
-
-应用设置页面提供了丰富的配置选项，允许用户根据需求调整系统行为。设置页面通过侧边栏菜单访问，支持实时调整和保存。
-
-#### 6.1 可配置参数
-
-| 分类 | 参数 | 默认值 | 说明 |
-|------|------|--------|------|
-| **LLM 输入** | 短期事件数量 | 10 | 输入到 LLM 的短期事件数量 |
-| | 长期事件数量 | 5 | 输入到 LLM 的长期事件数量 |
-| | 超长期事件数量 | 2 | 输入到 LLM 的超长期事件数量 |
-| | 关联事件数量 | 5 | 关键词检索返回的最大事件数 |
-| **本地存储** | 短期队列容量 | 2000 | 本地存储的短期事件最大数量 |
-| | 长期队列容量 | 500 | 本地存储的长期事件最大数量 |
-| | 超长期队列容量 | 200 | 本地存储的超长期事件最大数量 |
-| **Prompt** | 列表项数量 | 5 | Prompt 中列表项的最大数量 |
-| | 单行长度 | 200 | Prompt 中单行的最大字符数 |
-| | 边关系行数 | 20 | Prompt 中边关系的最大行数 |
-| **事件处理** | 总结阈值 | 10 | 触发事件总结的最小事件数 |
-| **关联检索** | 检索深度 | 2 | 关联检索的邻居层级深度（预留） |
-
-#### 6.2 综合搜索权重分配
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| 关键词匹配权重 | 60% | 综合评分中关键词匹配的权重百分比 |
-| 语义相似度权重 | 40% | 综合评分中语义相似度的权重百分比 |
-
-#### 6.3 LRU 权重设置
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| 关键词匹配权重 | 100 | 事件与用户输入关键词匹配的权重 |
-| 事件-事件关联权重 | 50 | 与关键词匹配事件相关联的事件权重 |
-| 事件-物品关联（关键词相关）权重 | 30 | 与关键词相关的物品关联事件权重 |
-| 事件-物品关联（普通）权重 | 10 | 普通物品关联事件权重 |
-| 事件-设定关联（关键词相关）权重 | 30 | 与关键词相关的设定关联事件权重 |
-| 事件-设定关联（普通）权重 | 10 | 普通设定关联事件权重 |
-
-#### 6.4 设置管理
-
-- **保存设置**：修改后点击右上角"保存"按钮
-- **恢复默认**：点击页面底部"恢复默认设置"按钮
-- **数据持久化**：设置存储在本地 SharedPreferences 中，重启应用后保持
-
-#### 6.5 调整建议
-
-- **性能优化**：减少队列容量可降低内存使用，提高应用响应速度
-- **精度优化**：增加 LLM 输入事件数量可提高上下文理解能力
-- **个性化**：调整权重参数可根据不同场景优化检索结果
-
-### 7. 移动端优化
-
-- 抽屉式侧边栏，点击菜单按钮呼出
-- 底部输入框，支持键盘自适应
-- 简洁的 AppBar 设计
-
-## 快速开始
-
-### 环境要求
-
-- Flutter SDK >= 3.4.0
-- Dart SDK >= 3.0.0
-- Android SDK / Xcode（用于移动端）
-- Chrome（用于 Web 端）
-
-### 安装依赖
-
-```bash
-flutter pub get
-```
-
-### 运行应用
-
-**Android:**
-```bash
-flutter run -d android
-```
-
-**iOS:**
-```bash
-flutter run -d ios
-```
-
-**Web:**
-```bash
-flutter run -d chrome
-```
-
-### 构建 Release 版本
-
-**Android APK:**
-```bash
-flutter build apk --release
-```
-输出路径：`build/app/outputs/flutter-apk/app-release.apk`
-
-## 下载 APK
-
-直接下载预编译的 APK 文件：[ai_roleplay_chat.apk](./ai_roleplay_chat.apk)
-
-## 使用指南
-
-### 1. 创建对象
-
-- 点击 AppBar 上的"创建对象"按钮（👤+ 图标）
-- 选择对象类型：角色或故事
-- 选择创建模式：普通、JSON 或自然语言
-- 填写对象信息并创建
-
-### 2. 开始对话
-
-- 在左侧栏（移动端为抽屉菜单）选择对象
-- 在底部输入框输入消息
-- 点击发送按钮或按回车键
-
-### 3. 删除对象
-
-- 桌面端：在侧边栏对象列表项右侧点击删除图标
-- 移动端：打开抽屉菜单，在底部点击删除按钮
-
-### 4. API 配置
-
-- 点击 AppBar 上的"API 配置"按钮（🔑 图标）
-- 输入 DeepSeek API 密钥
-- 可选：自定义系统提示词
-- 点击保存
-
-### 5. 应用设置
-
-- 点击 AppBar 上的"设置"按钮（⚙️ 图标）
-- 调整各类限长参数
-- 点击"保存"
+- **三级记忆级联**：短期（10）→ 长期（5）→ 超长期（2），阈值触发 + LLM 压缩，详见 [架构图](docs/architecture.html#三级记忆短期--长期--超长期)
+- **关键词召回 + 事件图 BFS**：本地 jieba + LLM 抽取关键词做关键词命中；`relatedEventsForPrompt` 在事件图上按关键词 + 边做 BFS 邻居检索（深度由 `searchDepth` 控制）。两条召回结果合并去重后进入 prompt 的"联想内容"段
+- **事件间边关系**：LLM 通过 `relatedEventIds` 声明强关联，**硬上限 2 个**；LRU 排序按关键词 + 邻居 + 物品/设定 关联权重综合打分
+- **三种创建方式**：表单 / JSON 导入 / 自然语言描述（LLM 转 JSON）
+- **撤回最近一轮**：基于 snapshot，可恢复消息列表 + 联系人
+- **调试模式**：显示完整 prompt + 关键词提取结果
+- **应用设置**：21 项可调（详见 [应用设置](#应用设置)）
 
 ## 项目结构
 
 ```
 lib/
-├── app.dart                                    # 应用根组件
-├── main.dart                                   # 入口文件
-├── constants/
-│   ├── api_constants.dart                      # API 配置常量
-│   └── app_strings.dart                        # 应用字符串
-├── core/
+├── main.dart, app.dart              # 入口
+├── features/chat/
+│   ├── domain/
+│   │   ├── providers/chat_provider.dart     # 核心状态机 (~2800 行)
+│   │   └── services/{heartbeat,input_formatter}.dart
 │   ├── data/
-│   │   └── models/
-│   │       └── app_settings.dart               # 应用设置模型
-│   ├── presentation/
-│   │   └── pages/
-│   │       └── app_settings_page.dart          # 设置页面
+│   │   ├── models/{contact,message}.dart    # 联系人（含 eventGraph）、消息
+│   │   ├── repositories/chat_repository.dart
+│   │   └── datasources/chat_local_storage.dart  # SharedPreferences
+│   └── presentation/
+│       ├── pages/chat_page.dart              # 主聊天界面
+│       └── widgets/{contact_sidebar,contact_editor_dialog}.dart
+├── core/
+│   ├── data/models/app_settings.dart
+│   ├── presentation/pages/{app_settings,assistant_config}_page.dart
 │   └── utils/
-│       ├── structured_input_prompt_composer.dart   # Prompt 组装
-│       └── structured_output_regex_parser.dart     # 输出解析
-└── features/
-    └── chat/
-        ├── data/
-        │   ├── datasources/
-        │   │   └── chat_local_storage.dart       # 本地存储
-        │   ├── models/
-        │   │   ├── contact.dart                  # 联系人/故事模型
-        │   │   └── message.dart                  # 消息模型
-        │   └── repositories/
-        │       └── chat_repository.dart          # 数据仓库
-        ├── domain/
-        │   ├── providers/
-        │   │   └── chat_provider.dart            # 状态管理
-        │   └── services/
-        │       ├── heartbeat_manager.dart        # 连接状态管理
-        │       └── input_formatter.dart          # 输入格式化
-        └── presentation/
-            ├── pages/
-            │   └── chat_page.dart                # 聊天页面
-            └── widgets/
-                ├── contact_sidebar.dart          # 侧边栏组件
-                └── contact_editor_dialog.dart    # 对象创建对话框
+│       ├── structured_input_prompt_composer.dart  # prompt 拼接
+│       ├── structured_output_regex_parser.dart    # JSON 解析
+│       ├── vector_memory_service.dart              # 向量记忆（预留扩展位：searchSimilar 未参与 prompt 拼装）
+│       └── chinese_tokenizer_service.dart          # jieba
+└── infrastructure/services/
+    ├── ai_service.dart        # LLM HTTP 客户端
+    └── opencode_service.dart  # opencode REST 客户端
 ```
 
-## 数据模型
+## 数据流（角色对话，单轮）
 
-### Contact（联系人/故事）
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant CP as ChatProvider
+    participant KW as Keyword Extract
+    participant VM as Vector Memory
+    participant CO as Composer
+    participant AS as AiService
+    participant LL as LLM
+    participant SP as SharedPreferences
+    participant PR as Parser
 
-```dart
-Contact {
-  id: String,                    // 唯一标识符
-  name: String,                  // 名称
-  avatar: String,                // 头像（emoji）
-  category: ContactCategory,     // 类型：contact/story/assistant
-  personality: List<String>,     // 性格特点/风格
-  appearance: List<String>,      // 外貌特征（仅角色）
-  personalInfo: List<String>,    // 个人信息（仅角色）
-  settings: List<Map>,           // 故事设定（仅故事）
-  backgroundStory: List<String>, // 背景故事/概述
-  worldKnowledge: List<String>,  // 世界观知识
-  selfKnowledge: List<String>,   // 自我认知
-  userKnowledge: List<String>,   // 对用户的了解
-  events: List<EventMemory>,     // 事件记忆
-  eventGraph: EventGraphMemory,  // 事件图
-  belongings: List<String>,      // 物品持有
-  status: List<String>,          // 身体状态
-  mood: String,                  // 情绪状态
-  time: String,                  // 当前时间
-}
+    U->>CP: sendMessage(text)
+    CP->>CP: _saveSnapshot(contact)
+    CP->>KW: jieba 本地 + LLM 抽取
+    KW-->>CP: keywords + theme
+    Note over CP: 相关事件: relatedEventsForPrompt(keywords, depth)<br/>BFS 邻居检索（已加 prompt）
+    CP-->>VM: searchSimilar(top 3)
+    Note right of VM: 虚线 = 当前未参与 prompt 拼装<br/>属预留扩展位（见已知限制）
+    CP->>CO: composeSystemPromptWithContactObject
+    CO-->>CP: systemPrompt
+    CP->>AS: askAi(prompt)
+    AS->>LL: POST chat/completions
+    LL-->>AS: {reply, memoryPatch}
+    AS-->>CP: 响应
+    CP->>PR: extractReply + extractMemoryPatch
+    CP->>CP: _updateContactFromMemoryPatch
+    Note over CP: 合并知识 / 事件 → short-term /<br/>summary? → long-term /<br/>belongings / states / edges / LRU
+    CP->>SP: saveContacts + saveMessagesByContact
+    CP->>VM: addMemoryEntry(userMessage)
+    CP-->>U: UI 刷新
 ```
 
-### EventMemory（事件）
+## 三级记忆（1→2 与 2→3 级联）
 
-```dart
-EventMemory {
-  time: String,        // 时间
-  location: String,    // 地点
-  characters: String,  // 人物
-  cause: String,       // 起因
-  process: String,     // 经过
-  result: String,      // 结果
-  attitude: String,    // 态度
-}
+- **1→2** 触发：短期 un-summarized ≥ `summaryThreshold`（默认 10）
+  - LLM 强制输出 `summary`，进入长期 un-summarized
+  - 旧 brief 搬入长期、标 summarized
+- **2→3** 触发：长期 un-summarized ≥ `ultraSummaryThreshold`（默认 5），**仅在 1→2 未触发时**
+  - 同样 LLM 输出 `summary`，进入超长期 un-summarized
+  - 旧长期 entry 搬入超长期、标 summarized
+- LLM 也可在场景/话题结束时**自主**输出 summary（不强制时）
+- 调 `ultraSummaryThreshold = 999` 即禁用 2→3
+
+> LLM 输出 summary 的提示词在 `_buildRules(mustSummarize: ...)` 区分强制 vs 自主。
+
+## 边关系
+
+LLM 在 `memoryPatch.relatedEventIds` 里声明与本次事件强相关的往期事件编号：
+
+- **硬上限 2 个**，重复边去重
+- 提示词里强调：宁缺毋滥，不要连环关联
+- 用于建立事件间边图，LRU 评分时会按 `lruEventEventWeight`（默认 50）给邻居事件加成
+
+## 助手（opencode）
+
+不走 LLM，直接 HTTP 调 PC 上跑的 `opencode serve`（默认 :4096）：
+
+```mermaid
+sequenceDiagram
+    actor U as User
+    participant CP as ChatProvider
+    participant OS as OpencodeService
+    participant OC as opencode
+
+    U->>CP: 助手联系人发消息
+    CP->>OS: execute(text)
+    OS->>OC: GET /global/health
+    OS->>OC: GET /config/providers (取 text-capable)
+    OS->>OC: GET /session (选 text-capable session)
+    OS->>OC: POST /session/:id/message
+    OC-->>OS: {info, parts: [...]}
+    OS->>OS: 过滤 type==="text" parts 拼接
+    OS-->>CP: result.output
+    CP->>CP: extractReply (StructuredOutputRegexParser)
+    CP-->>U: 显示回复
 ```
 
-### Setting（故事设定）
+**关键点**：
+- 选模型/session 时**过滤 TTS / 纯 audio 模型**（`capabilities.output.text !== false` 且 id/name 不含 `tts`）
+- LLM 响应结构和角色相同（`{reply, memoryPatch}`），按 `extractReply` 取 `reply` 字段
+- 缓存 `sessionId` 持久化，复用同一会话
+- Android 9+ 走明文 HTTP 需 `network_security_config.xml`（已配）
 
-```dart
-Setting {
-  key: String,         // 设定名称
-  value: String,       // 设定描述
-  relate: List<String> // 关联词
-}
+### opencode 声明与致谢
+
+本项目的助手桥接、远程执行与会话复用等部分功能基于 opencode 的服务接口与开发体验进行适配和开发。感谢 opencode 项目及其社区提供的开放工具与启发。
+
+本项目是独立开发的 AI 角色/故事对话应用，与 opencode 项目及其维护者不存在从属、隶属、官方合作或背书关系；项目中的 opencode 相关能力仅作为可选桥接功能使用。
+
+## 远程连接 PC 上的 opencode
+
+| 方式 | PC 端 | 安卓端配置 | 优缺点 |
+|---|---|---|---|
+| **Tailscale** | 装 Tailscale，登录同账号 | host=100.x.x.x, port=4096, http | 一次配好长期稳定，4G/5G/Wi-Fi 都通 |
+| **Cloudflare Tunnel** | `cloudflared tunnel --url http://localhost:4096` | host=trycloudflare.com, port=443, https ✓ | 零配置，URL 每次启动会变 |
+| **VPS SSH 反代** | `ssh -R 14096:127.0.0.1:4096 user@vps` | host=VPS 公网 IP, port=14096, http | 灵活但 VPS 自身是攻击面 |
+
+> PC 启动：`opencode web --hostname 0.0.0.0 --port 4096`（建议 `export OPENCODE_SERVER_PASSWORD=xxx`）
+
+## 应用设置
+
+应用设置页（右上角齿轮）共 21 项，分 6 组：
+
+| 分组 | 设置 | 默认 | 范围 |
+|---|---|---|---|
+| **LLM 输入限制** | maxShortTermEvents | 10 | 1-50 |
+| | maxLongTermEvents | 1 | 1-30（默认只取最新 summary；老 summary 走 2→3 进超长期） |
+| | maxUltraTermEvents | 2 | 1-20 |
+| | maxRelatedEvents | 5 | 1-20 |
+| **本地存储限制** | maxShortQueue | 2000 | 100-10000 |
+| | maxLongQueue | 500 | 50-5000 |
+| | maxUltraQueue | 200 | 20-2000 |
+| **Prompt 限制** | maxPromptListItems | 5 | 1-20 |
+| | maxPromptLineLength | 200 | 50-1000 |
+| **事件处理** | summaryThreshold | 10 | 2-50 |
+| | ultraSummaryThreshold | 5 | 2-100（设 999 禁用 2→3） |
+| **关联检索** | searchDepth | 2 | 1-5（BFS 跳数） |
+| | vectorSimilarityWeight | 80 | 0-100（当前未启用，保留作未来扩展位） |
+| **LRU 权重** | lruKeywordMatchWeight | 100 | 1-500 |
+| | lruEventEventWeight | 50 | 1-300 |
+| | lruEventBelongingKeywordWeight | 30 | 1-200 |
+| | lruEventBelongingNormalWeight | 10 | 1-100 |
+| | lruEventSettingKeywordWeight | 30 | 1-200 |
+| | lruEventSettingNormalWeight | 10 | 1-100 |
+| **关键词库** | keywordLibrarySize | 200 | 50-1000 |
+
+## 数据存储
+
+| 数据 | 存储 | Key |
+|---|---|---|
+| 联系人（含 eventGraph） | SharedPreferences | `chat_contacts_v1` |
+| 消息历史 | SharedPreferences | `chat_messages_v1` |
+| App 设置 | SharedPreferences | `app_settings_v1` |
+| opencode 连接配置 | SharedPreferences | `opencode_connection_v1` |
+| 向量记忆（预留） | JSON 文件 | `<app Documents>/vector_memory.json` |
+
+> 安卓设备查看：`adb pull /data/data/<package>/shared_prefs/`
+
+## 已知限制
+
+- **向量记忆是预留扩展位**：`VectorMemoryService.searchSimilar` 算出的结果目前**未参与 prompt 拼装**（`_buildPromptContact` 没消费 `weightedMemories`）。`addMemoryEntry` 在每轮发送后入库是真实运行；`vectorSimilarityWeight` 设置保留但暂未生效
+- **字符级伪向量**：`_simpleEmbedding` 走 `codeUnit` 累加 + 余弦相似度，不是真语义；`tflite_flutter` 已在 `pubspec.yaml` 但未挂接真模型（属于未来升级点）
+- `legacy events: EventLruBucket` 仍在写但 prompt 实际只读 `eventGraph`，旧字段是冗余
+- SSH 模式在 `OpencodeService._executeViaSsh` 里是占位，**实际只支持 HTTP**
+- opencode 的 `POST /session/:id/message` 是同步等待；超长 AI 任务（>300s）会撞默认超时
+- `comprehensiveKeywordWeight` / `comprehensiveSemanticWeight` 字段已删除（之前是规划未落地的"综合搜索"功能）
+
+## 构建
+
+```bash
+# 1. 安装 Flutter SDK 3.41+、Dart 3.4+
+# 2. 拉依赖
+flutter pub get
+
+# 3. 调试运行（接真机或模拟器）
+flutter run
+
+# 4. 打包发布 APK
+flutter build apk --release
+# 产物：build/app/outputs/flutter-apk/app-release.apk
 ```
 
-## 技术特点
+## 依赖
 
-### 1. 状态管理
+- `http: ^1.2.2` — LLM / opencode HTTP 客户端
+- `shared_preferences: ^2.5.3` — 本地 KV 存储
+- `path_provider: ^2.1.5` — 应用文档目录（vector_memory.json 预留位用）
+- `tflite_flutter: ^0.10.4` — 已声明但**目前未挂接且未在路径上使用**（见已知限制）
+- `jieba_flutter: ^0.2.0` — 中文分词
 
-使用 ChangeNotifier 模式实现响应式状态管理：
-- ChatProvider 管理全局状态
-- UI 层通过 AnimatedBuilder 监听状态变化
-- 自动触发 UI 重建
+---
 
-### 2. 响应式布局
+## 架构与数据流图
 
-- 桌面端（宽度 >= 900px）：左右分栏布局
-- 移动端（宽度 < 900px）：抽屉式侧边栏
-- 自适应不同屏幕尺寸
+完整 mermaid 流程图、状态机、数据存储布局、参数对照表：
 
-### 3. 组件化设计
+👉 **[docs/architecture.html](docs/architecture.html)**
 
-- ContactSidebar：可复用的侧边栏组件
-- ContactEditorDialog：对象创建对话框
-- 支持参数配置（如删除按钮显示位置）
-
-### 4. 持久化存储
-
-使用 SharedPreferences 存储：
-- API 密钥
-- 系统提示词
-- 应用设置
-- 联系人列表
-- 各联系人消息历史
-
-### 5. 事件图系统
-
-**三层级事件存储**：
-- **短期队列**：原始事件，最多 2000 条，存储详细对话记录
-- **长期队列**：总结事件，最多 500 条，存储短期事件的压缩摘要
-- **超长期队列**：历史事件，最多 200 条，存储长期历史的关键节点
-
-**分层LRU管理**：
-- **固定输入部分**：前N条按时间顺序固定输入LLM（短期10条/长期5条/超长期2条）
-- **LRU管理部分**：超出固定数量的事件按LRU策略排序管理
-- **LRU排序依据**：关键词匹配度、事件关联度、belonging关联度、时间戳
-
-**Belongings/Settings LRU管理（全局）**：
-- **无固定部分**：所有关联事件都参与LRU排序
-- **排序规则**：关键词匹配优先，时间倒序次之
-- **容量限制**：每个物品/设定最多保留100个最相关事件
-
-**智能检索算法**：
-- **关键词匹配**：提取用户输入和事件文本的关键词，计算匹配度
-- **语义相似度**：使用 Jaccard 相似度算法计算文本语义相似性
-- **综合评分**：结合关键词匹配和语义相似度计算最终分数（权重可在设置中调整）
-
-**多级检索策略**：
-1. **直接事件匹配**：遍历所有事件，按综合分数排序
-2. **物品关联检索**：搜索相关物品及其关联事件（LRU排序后）
-3. **设定关联检索**：搜索相关设定及其关联事件（LRU排序后）
-
-## 配置说明
-
-### Android 权限
-
-在 `android/app/src/main/AndroidManifest.xml` 中已配置：
-
-- `INTERNET` - 网络访问
-- `ACCESS_NETWORK_STATE` - 网络状态
-- `READ_EXTERNAL_STORAGE` - 读取存储
-- `WRITE_EXTERNAL_STORAGE` - 写入存储
-- `MANAGE_EXTERNAL_STORAGE` - 管理外部存储
-- `FOREGROUND_SERVICE` - 前台服务
-- `WAKE_LOCK` - 唤醒锁定
-- `RECEIVE_BOOT_COMPLETED` - 开机启动
-
-### API 配置
-
-应用使用 DeepSeek API，需要在设置中配置 API Key。
-
-## 许可证
-
-MIT License
+（用浏览器直接打开；GitHub 上 README 里的 mermaid 块会自动渲染）

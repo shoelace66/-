@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  网络安全配置：放行"开发/远程调试助手"场景下的明文 HTTP 流量。
+
+  本 app 的助手功能需要连到 PC 上跑的 opencode，常见部署方案：
+    - localhost / 127.0.0.1                    → 同机调试
+    - 10.0.0.0/8、172.16.0.0/12、192.168.0.0/16 → 局域网
+    - 100.64.0.0/10                            → Tailscale 段
+    - 公网 IP / VPS IP                          → SSH 反向隧道 / 端口映射
+    - cloudflare tunnel / 自建 HTTPS 反代      → 用 HTTPS（走系统 CA）
+
+  因为需要连 IP 而 network-security-config 的 domain 列表只支持
+  域名不支持 CIDR，开发期 base-config 直接放开明文流量最省事。
+  若要锁更紧，可以把 base-config cleartextTrafficPermitted 改回 false，
+  并在 domain-config 里逐个加白名单域名（IP 不行，只能加域名/IP 字面量）。
+
+  HTTPS（含 cloudflare tunnel、域名 + 证书）走系统默认 CA 验证，
+  跟此配置无关。
+-->
+<network-security-config>
+    <!-- 信任系统 CA，TLS 走默认校验 -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

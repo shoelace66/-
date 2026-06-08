@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 
 import '../../../../core/presentation/pages/app_settings_page.dart';
+import '../../../../core/presentation/pages/assistant_config_page.dart';
 import '../../data/models/contact.dart';
 import '../../data/models/message.dart';
 import '../../domain/providers/chat_provider.dart';
@@ -164,24 +165,9 @@ class _ChatPageState extends State<ChatPage> {
         category: result.category,
         fallbackName: result.name.isNotEmpty ? result.name : null,
         fallbackAvatar: result.avatar.isNotEmpty ? result.avatar : null,
-        fallbackPersonality:
-            result.personality.isNotEmpty ? result.personality : null,
-        fallbackAppearance:
-            result.appearance?.isNotEmpty == true ? result.appearance : null,
-        fallbackPersonalInfo: result.personalInfo?.isNotEmpty == true
-            ? result.personalInfo
-            : null,
-        fallbackSettings:
-            result.settings?.isNotEmpty == true ? result.settings : null,
-        fallbackBackgroundStory:
-            result.backgroundStory.isNotEmpty ? result.backgroundStory : null,
-        fallbackNarrativeRules: result.narrativeRules?.isNotEmpty == true
-            ? result.narrativeRules
-            : null,
-        fallbackOtherCharacteristics:
-            result.otherCharacteristics?.isNotEmpty == true
-                ? result.otherCharacteristics
-                : null,
+        fallbackFixedInput:
+            result.fixedInput.isNotEmpty ? result.fixedInput : null,
+        fallbackCurrentStates: result.currentStates,
       );
       if (!mounted) return;
 
@@ -206,24 +192,9 @@ class _ChatPageState extends State<ChatPage> {
         category: result.category,
         fallbackName: result.name.isNotEmpty ? result.name : null,
         fallbackAvatar: result.avatar.isNotEmpty ? result.avatar : null,
-        fallbackPersonality:
-            result.personality.isNotEmpty ? result.personality : null,
-        fallbackAppearance:
-            result.appearance?.isNotEmpty == true ? result.appearance : null,
-        fallbackPersonalInfo: result.personalInfo?.isNotEmpty == true
-            ? result.personalInfo
-            : null,
-        fallbackSettings:
-            result.settings?.isNotEmpty == true ? result.settings : null,
-        fallbackBackgroundStory:
-            result.backgroundStory.isNotEmpty ? result.backgroundStory : null,
-        fallbackNarrativeRules: result.narrativeRules?.isNotEmpty == true
-            ? result.narrativeRules
-            : null,
-        fallbackOtherCharacteristics:
-            result.otherCharacteristics?.isNotEmpty == true
-                ? result.otherCharacteristics
-                : null,
+        fallbackFixedInput:
+            result.fixedInput.isNotEmpty ? result.fixedInput : null,
+        fallbackCurrentStates: result.currentStates,
       );
       if (!mounted) return;
       if (!ok) {
@@ -239,13 +210,8 @@ class _ChatPageState extends State<ChatPage> {
       final ok = await _provider.addContact(
         name: result.name,
         avatar: result.avatar,
-        personality: result.personality,
-        appearance: result.appearance ?? [],
-        personalInfo: result.personalInfo ?? [],
-        settings: result.settings ?? [],
-        backgroundStory: result.backgroundStory,
-        narrativeRules: result.narrativeRules ?? [],
-        otherCharacteristics: result.otherCharacteristics ?? [],
+        fixedInput: result.fixedInput,
+        currentStates: result.currentStates,
         category: result.category,
       );
       if (!mounted) return;
@@ -300,6 +266,17 @@ class _ChatPageState extends State<ChatPage> {
                 },
                 tooltip: '应用设置',
                 icon: const Icon(Icons.settings_outlined),
+              ),
+              IconButton(
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (context) => AssistantConfigPage(provider: _provider),
+                    ),
+                  );
+                },
+                tooltip: '助手连接配置',
+                icon: const Icon(Icons.terminal_outlined),
               ),
               IconButton(
                 onPressed: _provider.toggleDebugMode,
@@ -512,6 +489,13 @@ class _ChatPageState extends State<ChatPage> {
                     ),
                   );
                   break;
+                case 'assistant':
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (context) => AssistantConfigPage(provider: _provider),
+                    ),
+                  );
+                  break;
                 case 'debug':
                   _provider.toggleDebugMode();
                   break;
@@ -554,6 +538,16 @@ class _ChatPageState extends State<ChatPage> {
                     Icon(Icons.settings_outlined),
                     SizedBox(width: 8),
                     Text('应用设置'),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'assistant',
+                child: Row(
+                  children: [
+                    Icon(Icons.terminal_outlined),
+                    SizedBox(width: 8),
+                    Text('助手连接配置'),
                   ],
                 ),
               ),
@@ -792,6 +786,7 @@ class _MessageBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isUser = message.role == MessageRole.user;
+    final isDebug = message.content.startsWith('【调试信息】');
     final time =
         '${message.createdAt.hour.toString().padLeft(2, '0')}:${message.createdAt.minute.toString().padLeft(2, '0')}';
     final theme = Theme.of(context);
@@ -830,11 +825,13 @@ class _MessageBubble extends StatelessWidget {
                 margin: const EdgeInsets.symmetric(vertical: 6),
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
                 decoration: BoxDecoration(
-                  color: isUser
-                      ? message.status == MessageStatus.failed
-                          ? Colors.red.shade50
-                          : theme.colorScheme.primary.withValues(alpha: 0.15)
-                      : theme.colorScheme.surfaceContainerHighest,
+                  color: isDebug
+                      ? Colors.amber.shade50
+                      : isUser
+                          ? message.status == MessageStatus.failed
+                              ? Colors.red.shade50
+                              : theme.colorScheme.primary.withValues(alpha: 0.15)
+                          : theme.colorScheme.surfaceContainerHighest,
                   borderRadius: BorderRadius.only(
                     topLeft: const Radius.circular(18),
                     topRight: const Radius.circular(18),

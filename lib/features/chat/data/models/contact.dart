@@ -83,60 +83,101 @@ class UserKnowledgeBucket extends LruReadyBucket {
 
 class EventMemory {
   const EventMemory({
-    this.time = '',
-    this.location = '',
-    this.characters = '',
-    this.cause = '',
-    this.process = '',
-    this.result = '',
-    this.attitude = '',
+    this.description = '',
+    this.keywords = const <String>[],
+    this.theme = const <String>[],
     this.sourceDialog = '',
   });
 
-  final String time;
-  final String location;
-  final String characters;
-  final String cause;
-  final String process;
-  final String result;
-  final String attitude;
+  /// 事件概述（300字以内的自由文本）
+  final String description;
+
+  /// LLM 输出的实体关键词列表，用于搜索和匹配
+  /// 包含人物、地点、物品等具体实体
+  final List<String> keywords;
+
+  /// LLM 输出的主题/氛围关键词列表
+  /// 包含情感、氛围、主题等抽象概念，如"遗憾"、"温暖"、"悬疑"
+  final List<String> theme;
 
   /// 原始对话内容（用户输入 + LLM 输出），用于事件总结时提供上下文
   final String sourceDialog;
 
-  bool get isEmpty =>
-      time.trim().isEmpty &&
-      location.trim().isEmpty &&
-      characters.trim().isEmpty &&
-      cause.trim().isEmpty &&
-      process.trim().isEmpty &&
-      result.trim().isEmpty &&
-      attitude.trim().isEmpty;
+  bool get isEmpty => description.trim().isEmpty;
 
   factory EventMemory.fromJson(Map<String, dynamic> json) {
     String read(String key) => (json[key] ?? '').toString().trim();
+
+    // 兼容旧格式：检测旧字段并合并为 description
+    final hasOldFields = json.containsKey('time') ||
+        json.containsKey('location') ||
+        json.containsKey('characters') ||
+        json.containsKey('cause') ||
+        json.containsKey('process') ||
+        json.containsKey('result') ||
+        json.containsKey('attitude');
+
+    String description;
+    if (hasOldFields && !json.containsKey('description')) {
+      // 旧格式：拼接为 description
+      final seg = <String>[];
+      final time = read('time');
+      final location = read('location');
+      final characters = read('characters');
+      final cause = read('cause');
+      final process = read('process');
+      final result = read('result');
+      final attitude = read('attitude');
+      if (time.isNotEmpty) seg.add('时间=$time');
+      if (location.isNotEmpty) seg.add('地点=$location');
+      if (characters.isNotEmpty) seg.add('人物=$characters');
+      if (cause.isNotEmpty) seg.add('起因=$cause');
+      if (process.isNotEmpty) seg.add('经过=$process');
+      if (result.isNotEmpty) seg.add('结果=$result');
+      if (attitude.isNotEmpty) seg.add('态度=$attitude');
+      description = seg.join('；');
+    } else {
+      description = read('description');
+    }
+
+    // 解析 keywords
+    final keywordsRaw = json['keywords'];
+    final keywords = <String>[];
+    if (keywordsRaw is List) {
+      for (final item in keywordsRaw) {
+        final v = item?.toString().trim() ?? '';
+        if (v.isNotEmpty) keywords.add(v);
+      }
+    }
+
+    // 解析 theme
+    final themeRaw = json['theme'];
+    final theme = <String>[];
+    if (themeRaw is List) {
+      for (final item in themeRaw) {
+        final v = item?.toString().trim() ?? '';
+        if (v.isNotEmpty) theme.add(v);
+      }
+    }
+
     return EventMemory(
-      time: read('time'),
-      location: read('location'),
-      characters: read('characters'),
-      cause: read('cause'),
-      process: read('process'),
-      result: read('result'),
-      attitude: read('attitude'),
+      description: description,
+      keywords: keywords,
+      theme: theme,
       sourceDialog: read('sourceDialog'),
     );
   }
 
   Map<String, dynamic> toJson() {
     final json = <String, dynamic>{
-      'time': time,
-      'location': location,
-      'characters': characters,
-      'cause': cause,
-      'process': process,
-      'result': result,
-      'attitude': attitude,
+      'description': description,
     };
+    if (keywords.isNotEmpty) {
+      json['keywords'] = keywords;
+    }
+    if (theme.isNotEmpty) {
+      json['theme'] = theme;
+    }
     if (sourceDialog.isNotEmpty) {
       json['sourceDialog'] = sourceDialog;
     }
@@ -144,28 +185,15 @@ class EventMemory {
   }
 
   String toPromptLine() {
-    final seg = <String>[];
-    if (time.trim().isNotEmpty) seg.add('时间=$time');
-    if (location.trim().isNotEmpty) seg.add('地点=$location');
-    if (characters.trim().isNotEmpty) seg.add('人物=$characters');
-    if (cause.trim().isNotEmpty) seg.add('起因=$cause');
-    if (process.trim().isNotEmpty) seg.add('经过=$process');
-    if (result.trim().isNotEmpty) seg.add('结果=$result');
-    if (attitude.trim().isNotEmpty) seg.add('态度=$attitude');
-    return seg.join('；');
+    return description;
   }
 
   /// 生成用于事件总结的详细描述，包含原始对话内容
   String toSummaryPromptLine() {
-    final base = toPromptLine();
     if (sourceDialog.trim().isNotEmpty) {
-      return '$base\n【原始对话】\n$sourceDialog';
+      return '$description\n【原始对话】\n$sourceDialog';
     }
-    return base;
-  }
-
-  String toSearchableText() {
-    return '$time $location $characters $cause $process $result $attitude $sourceDialog';
+    return description;
   }
 }
 
@@ -199,7 +227,7 @@ class EventLruBucket {
   final Map<String, int> indexByKey;
 
   static String _eventKey(EventMemory e) {
-    return '${e.time}|${e.location}|${e.characters}|${e.cause}|${e.process}|${e.result}|${e.attitude}|${e.sourceDialog}';
+    return '${e.description}|${e.sourceDialog}';
   }
 }
 
@@ -416,13 +444,9 @@ class EventGraphMemory {
                 id: n.id,
                 tier: n.tier,
                 event: EventMemory(
-                  time: n.event.time,
-                  location: n.event.location,
-                  characters: n.event.characters,
-                  cause: n.event.cause,
-                  process: n.event.process,
-                  result: n.event.result,
-                  attitude: n.event.attitude,
+                  description: n.event.description,
+                  keywords: List<String>.from(n.event.keywords),
+                  theme: List<String>.from(n.event.theme),
                   sourceDialog: n.event.sourceDialog,
                 ),
                 createdAtMs: n.createdAtMs,
@@ -434,13 +458,9 @@ class EventGraphMemory {
                 id: n.id,
                 tier: n.tier,
                 event: EventMemory(
-                  time: n.event.time,
-                  location: n.event.location,
-                  characters: n.event.characters,
-                  cause: n.event.cause,
-                  process: n.event.process,
-                  result: n.event.result,
-                  attitude: n.event.attitude,
+                  description: n.event.description,
+                  keywords: List<String>.from(n.event.keywords),
+                  theme: List<String>.from(n.event.theme),
                   sourceDialog: n.event.sourceDialog,
                 ),
                 createdAtMs: n.createdAtMs,
@@ -452,13 +472,9 @@ class EventGraphMemory {
                 id: n.id,
                 tier: n.tier,
                 event: EventMemory(
-                  time: n.event.time,
-                  location: n.event.location,
-                  characters: n.event.characters,
-                  cause: n.event.cause,
-                  process: n.event.process,
-                  result: n.event.result,
-                  attitude: n.event.attitude,
+                  description: n.event.description,
+                  keywords: List<String>.from(n.event.keywords),
+                  theme: List<String>.from(n.event.theme),
                   sourceDialog: n.event.sourceDialog,
                 ),
                 createdAtMs: n.createdAtMs,
@@ -491,10 +507,16 @@ class EventGraphMemory {
     );
   }
 
-  List<EventMemory> relatedEventsForPrompt(String userInput,
-      {int maxResults = 5, int keywordWeight = 60, int semanticWeight = 40}) {
-    final keywords = _extractKeywords(userInput);
-    if (keywords.isEmpty) return const <EventMemory>[];
+  List<EventMemory> relatedEventsForPrompt(
+    List<String> inputKeywords, {
+    int maxResults = 5,
+    // 邻居 BFS 深度：1 = 仅直连节点；2 = 一度+二度；默认 2。
+    // 调高可拉到更远关联但 prompt 噪音也变大。
+    int depth = 2,
+  }) {
+    if (inputKeywords.isEmpty) return const <EventMemory>[];
+    final inputKeywordSet = inputKeywords.map((e) => e.toLowerCase()).toSet();
+    final effectiveDepth = depth < 1 ? 1 : depth;
 
     final allNodes = <EventNode>[
       ...shortTermQueue,
@@ -505,22 +527,13 @@ class EventGraphMemory {
 
     final scored = <_ScoredNode>[];
     for (final node in allNodes) {
-      // 关键词匹配分数
-      final keywordScore = _keywordHitCount(
-        keywords,
-        _extractKeywords(node.event.toSearchableText()),
-      );
-
-      // 语义相似度分数（简化版）
-      final semanticScore = _calculateSemanticSimilarity(
-          userInput, node.event.toSearchableText());
-
-      // 综合分数（使用传入的权重，支持权重和不为100的情况）
-      final totalScore = keywordScore * (keywordWeight / 100) +
-          semanticScore * (semanticWeight / 100);
-
-      if (totalScore > 0) {
-        scored.add(_ScoredNode(node: node, score: totalScore));
+      // 关键词交集匹配：用户 keywords 与事件 keywords + theme 的交集数
+      final eventKeywords = node.event.keywords.map((e) => e.toLowerCase()).toSet();
+      final eventTheme = node.event.theme.map((e) => e.toLowerCase()).toSet();
+      final eventAll = <String>{...eventKeywords, ...eventTheme};
+      final hitCount = inputKeywordSet.intersection(eventAll).length;
+      if (hitCount > 0) {
+        scored.add(_ScoredNode(node: node, score: hitCount.toDouble()));
       }
     }
     scored.sort((a, b) {
@@ -542,30 +555,41 @@ class EventGraphMemory {
     final result = <EventMemory>[];
     final seen = <String>{};
 
+    // 按 score 顺序遍历每个命中事件，限制只走 effectiveDepth 层邻居
     for (final hit in scored) {
       if (result.length >= maxResults) break;
       if (seen.add(hit.node.id)) result.add(hit.node.event);
-      final neighbors = adjacent[hit.node.id] ?? const <String>{};
-      for (final id in neighbors) {
-        if (result.length >= maxResults) break;
+
+      // BFS 队列：(nodeId, currentDepth)
+      final queue = <List<String>>[
+        for (final id in adjacent[hit.node.id] ?? const <String>{}) [id, '1'],
+      ];
+      while (queue.isNotEmpty && result.length < maxResults) {
+        final entry = queue.removeAt(0);
+        final id = entry[0];
+        final d = int.tryParse(entry[1]) ?? 1;
+        if (!seen.add(id)) continue;
         final node = idToNode[id];
         if (node == null) continue;
-        if (seen.add(node.id)) result.add(node.event);
+        result.add(node.event);
+        if (d < effectiveDepth) {
+          for (final next in adjacent[id] ?? const <String>{}) {
+            queue.add([next, '${d + 1}']);
+          }
+        }
       }
     }
 
     if (result.length >= maxResults) return result.take(maxResults).toList();
 
+    // 搜索物品队列：物品名与输入关键词做交集
     final scoredBelongings = <_ScoredBelonging>[];
     for (final key in belongingEventQueues.keys) {
-      final score = _keywordHitCount(keywords, _extractKeywords(key)) *
-              (keywordWeight / 100) +
-          _calculateSemanticSimilarity(userInput, key) * (semanticWeight / 100);
-      if (score > 0) {
-        scoredBelongings.add(_ScoredBelonging(name: key, score: score));
+      final keyLower = key.toLowerCase();
+      if (inputKeywordSet.any((kw) => keyLower.contains(kw) || kw.contains(keyLower))) {
+        scoredBelongings.add(_ScoredBelonging(name: key, score: 1));
       }
     }
-    scoredBelongings.sort((a, b) => b.score.compareTo(a.score));
     for (final b in scoredBelongings) {
       final queue = belongingEventQueues[b.name] ?? const <String>[];
       for (final eventId in queue.reversed) {
@@ -576,17 +600,14 @@ class EventGraphMemory {
       }
     }
 
-    // 搜索 settingEventQueues（类似 belongings 的搜索逻辑）
+    // 搜索设定队列：设定名与输入关键词做交集
     final scoredSettings = <_ScoredSetting>[];
     for (final key in settingEventQueues.keys) {
-      final score = _keywordHitCount(keywords, _extractKeywords(key)) *
-              (keywordWeight / 100) +
-          _calculateSemanticSimilarity(userInput, key) * (semanticWeight / 100);
-      if (score > 0) {
-        scoredSettings.add(_ScoredSetting(key: key, score: score));
+      final keyLower = key.toLowerCase();
+      if (inputKeywordSet.any((kw) => keyLower.contains(kw) || kw.contains(keyLower))) {
+        scoredSettings.add(_ScoredSetting(key: key, score: 1));
       }
     }
-    scoredSettings.sort((a, b) => b.score.compareTo(a.score));
     for (final s in scoredSettings) {
       final queue = settingEventQueues[s.key] ?? const <String>[];
       for (final eventId in queue.reversed) {
@@ -600,41 +621,6 @@ class EventGraphMemory {
     return result.take(maxResults).toList();
   }
 
-  double _calculateSemanticSimilarity(String text1, String text2) {
-    // 简化的语义相似度计算
-    // 实际项目中可以使用向量存储服务
-    final words1 = _extractKeywords(text1);
-    final words2 = _extractKeywords(text2);
-
-    if (words1.isEmpty || words2.isEmpty) return 0.0;
-
-    // 计算重叠词的比例
-    final intersection = words1.intersection(words2).length;
-    final union = words1.union(words2).length;
-
-    // 计算Jaccard相似度
-    return intersection / union.toDouble();
-  }
-
-  static int _keywordHitCount(Set<String> lhs, Set<String> rhs) {
-    var c = 0;
-    for (final k in lhs) {
-      if (rhs.contains(k)) c++;
-    }
-    return c;
-  }
-
-  static final RegExp _tokenReg = RegExp(r'[\u4e00-\u9fffA-Za-z0-9_]{2,}');
-
-  static Set<String> _extractKeywords(String raw) {
-    final out = <String>{};
-    for (final m in _tokenReg.allMatches(raw.toLowerCase())) {
-      final token = m.group(0)?.trim();
-      if (token == null || token.isEmpty) continue;
-      out.add(token);
-    }
-    return out;
-  }
 }
 
 class _ScoredNode {
@@ -661,6 +647,8 @@ class Contact {
     required this.name,
     required this.avatar,
     this.category = ContactCategory.contact,
+    this.fixedInput = '',
+    this.currentStates = const <String, String>{},
     this.personality = const <String>[],
     this.appearance = const <String>[],
     this.personalInfo = const <String>[],
@@ -671,6 +659,8 @@ class Contact {
     this.worldKnowledge = const WorldKnowledgeBucket.empty(),
     this.selfKnowledge = const SelfKnowledgeBucket.empty(),
     this.userKnowledge = const UserKnowledgeBucket.empty(),
+    this.keywordLibrary = const <String>[],
+    this.themeLibrary = const <String>[],
     this.events = const EventLruBucket.empty(),
     this.eventGraph = const EventGraphMemory(),
     this.belongings = const <String>[],
@@ -684,6 +674,8 @@ class Contact {
   final String name;
   final String avatar;
   final ContactCategory category;
+  final String fixedInput;
+  final Map<String, String> currentStates;
   final List<String> personality;
   final List<String> appearance;
   final List<String> personalInfo;
@@ -694,6 +686,8 @@ class Contact {
   final WorldKnowledgeBucket worldKnowledge;
   final SelfKnowledgeBucket selfKnowledge;
   final UserKnowledgeBucket userKnowledge;
+  final List<String> keywordLibrary;
+  final List<String> themeLibrary;
   final EventLruBucket events;
   final EventGraphMemory eventGraph;
   final List<String> belongings;
@@ -712,6 +706,8 @@ class Contact {
       name: (json['name'] ?? '').toString(),
       avatar: (json['avatar'] ?? '').toString(),
       category: _contactCategoryFromStorage(categoryText),
+      fixedInput: (json['fixedInput'] ?? '').toString(),
+      currentStates: _readStringMap(json['currentStates']),
       personality: _readStringList(json['personality']),
       appearance: _readStringList(json['appearance']),
       personalInfo: _readStringList(json['personalInfo']),
@@ -725,6 +721,8 @@ class Contact {
           SelfKnowledgeBucket(_readStringList(json['selfKnowledge'])),
       userKnowledge:
           UserKnowledgeBucket(_readStringList(json['userKnowledge'])),
+      keywordLibrary: _readStringList(json['keywordLibrary']),
+      themeLibrary: _readStringList(json['themeLibrary']),
       events: EventLruBucket(_readEventMemoryList(json['events'])),
       eventGraph: EventGraphMemory.fromJson(_asMap(json['eventGraph'])),
       belongings: _readStringList(json['belongings']),
@@ -747,6 +745,8 @@ class Contact {
 
     // 只存储非空字段
     if (avatar.isNotEmpty) json['avatar'] = avatar;
+    if (fixedInput.isNotEmpty) json['fixedInput'] = fixedInput;
+    if (currentStates.isNotEmpty) json['currentStates'] = currentStates;
     if (personality.isNotEmpty) json['personality'] = personality;
     if (appearance.isNotEmpty) json['appearance'] = appearance;
     if (personalInfo.isNotEmpty) json['personalInfo'] = personalInfo;
@@ -761,6 +761,10 @@ class Contact {
       json['selfKnowledge'] = selfKnowledge.items;
     if (userKnowledge.items.isNotEmpty)
       json['userKnowledge'] = userKnowledge.items;
+    if (keywordLibrary.isNotEmpty)
+      json['keywordLibrary'] = keywordLibrary;
+    if (themeLibrary.isNotEmpty)
+      json['themeLibrary'] = themeLibrary;
     if (events.items.isNotEmpty)
       json['events'] = events.items.map((e) => e.toJson()).toList();
     if (eventGraph.shortTermQueue.isNotEmpty ||
@@ -790,6 +794,8 @@ class Contact {
       name: name,
       avatar: avatar,
       category: category,
+      fixedInput: fixedInput,
+      currentStates: Map<String, String>.from(currentStates),
       personality: List<String>.from(personality),
       appearance: List<String>.from(appearance),
       personalInfo: List<String>.from(personalInfo),
@@ -803,15 +809,13 @@ class Contact {
           SelfKnowledgeBucket(List<String>.from(selfKnowledge.items)),
       userKnowledge:
           UserKnowledgeBucket(List<String>.from(userKnowledge.items)),
+      keywordLibrary: List<String>.from(keywordLibrary),
+      themeLibrary: List<String>.from(themeLibrary),
       events: EventLruBucket(events.items
           .map((e) => EventMemory(
-                time: e.time,
-                location: e.location,
-                characters: e.characters,
-                cause: e.cause,
-                process: e.process,
-                result: e.result,
-                attitude: e.attitude,
+                description: e.description,
+                keywords: List<String>.from(e.keywords),
+                theme: List<String>.from(e.theme),
                 sourceDialog: e.sourceDialog,
               ))
           .toList()),
@@ -852,6 +856,17 @@ List<String> _readStringList(dynamic value) {
       .map((e) => e?.toString().trim() ?? '')
       .where((e) => e.isNotEmpty)
       .toList();
+}
+
+Map<String, String> _readStringMap(dynamic value) {
+  if (value is! Map) return const <String, String>{};
+  final out = <String, String>{};
+  for (final entry in value.entries) {
+    final key = entry.key.toString().trim();
+    if (key.isEmpty) continue;
+    out[key] = entry.value?.toString().trim() ?? '';
+  }
+  return out;
 }
 
 List<EventMemory> _readEventMemoryList(dynamic value) {

@@ -20,7 +20,7 @@ class ChatAgentStore {
   static const String _messagesKey = 'chat_messages_v1';
   static const Map<String, dynamic> _defaultSettings = <String, dynamic>{
     'apiKey': '',
-    'systemPrompt': 'You are a helpful assistant.',
+    'systemPrompt': '你是一个AI角色扮演对话助手，专注于沉浸式对话体验。',
   };
 
   /// 获取 SharedPreferences 实例

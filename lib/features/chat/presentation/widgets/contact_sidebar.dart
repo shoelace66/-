@@ -201,9 +201,13 @@ class ContactSidebar extends StatelessWidget {
                                   : theme.colorScheme.onSurface,
                             ),
                           ),
-                          subtitle: c.status.isNotEmpty
+                          subtitle: c.currentStates.isNotEmpty
                               ? Text(
-                                  c.status.first,
+                                  c.currentStates.entries.first.value
+                                          .trim()
+                                          .isEmpty
+                                      ? c.currentStates.entries.first.key
+                                      : '${c.currentStates.entries.first.key}: ${c.currentStates.entries.first.value}',
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
                                     fontSize: 12,

@@ -52,7 +52,8 @@ class StructuredOutputRegexParser {
 
   /// 安全地从 memoryPatch 中提取字符串列表
   /// 如果字段不存在或为空，返回空列表
-  static List<String> extractStringList(Map<String, dynamic>? patch, String key) {
+  static List<String> extractStringList(
+      Map<String, dynamic>? patch, String key) {
     if (patch == null) return const <String>[];
     final value = patch[key];
     if (value == null) return const <String>[];
@@ -74,9 +75,26 @@ class StructuredOutputRegexParser {
     return str;
   }
 
+  static Map<String, String> extractStringMap(
+    Map<String, dynamic>? patch,
+    String key,
+  ) {
+    if (patch == null) return const <String, String>{};
+    final value = patch[key];
+    if (value is! Map) return const <String, String>{};
+    final out = <String, String>{};
+    for (final entry in value.entries) {
+      final mapKey = entry.key.toString().trim();
+      if (mapKey.isEmpty) continue;
+      out[mapKey] = entry.value?.toString().trim() ?? '';
+    }
+    return out;
+  }
+
   /// 安全地从 memoryPatch 中提取事件列表
   /// 如果字段不存在或为空，返回空列表
-  static List<Map<String, dynamic>> extractEventList(Map<String, dynamic>? patch) {
+  static List<Map<String, dynamic>> extractEventList(
+      Map<String, dynamic>? patch) {
     if (patch == null) return const <Map<String, dynamic>>[];
     final value = patch['events'];
     if (value == null) return const <Map<String, dynamic>>[];

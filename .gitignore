@@ -85,6 +85,7 @@ yarn-error.log
 android/build/
 android/app/build/
 android/.gradle/
+android/.kotlin/errors/
 
 # iOS
 ios/Pods/
@@ -104,6 +105,8 @@ web/build/
 
 # Windows
 Thumbs.db
+~$*.doc
+~$*.docx
 
 # Environment variables
 .env

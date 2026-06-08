@@ -148,7 +148,7 @@ class _AppSettingsPageState extends State<AppSettingsPage> {
                     ),
                     _buildNumberSetting(
                       title: '长期事件数量',
-                      subtitle: '输入到 LLM 的长期事件数量（默认: 5）',
+                      subtitle: '输入到 LLM 的长期事件数量（默认: 1，只取最新 summary；老 summary 通过 2→3 cascade 进超长期不会丢）',
                       value: _settings.maxLongTermEvents,
                       min: 1,
                       max: 30,
@@ -228,20 +228,10 @@ class _AppSettingsPageState extends State<AppSettingsPage> {
                         _settings = _settings.copyWith(maxPromptLineLength: v);
                       }),
                     ),
-                    _buildNumberSetting(
-                      title: '边关系行数',
-                      subtitle: 'Prompt 中边关系的最大行数（默认: 20）',
-                      value: _settings.maxEdgeLines,
-                      min: 5,
-                      max: 100,
-                      onChanged: (v) => setState(() {
-                        _settings = _settings.copyWith(maxEdgeLines: v);
-                      }),
-                    ),
                     _buildSectionTitle('事件处理'),
                     _buildNumberSetting(
-                      title: '总结阈值',
-                      subtitle: '触发事件总结的最小事件数（默认: 10）',
+                      title: '总结阈值（短期→长期）',
+                      subtitle: '短期事件数 ≥ 此值时让 LLM 压缩到长期（默认: 10）',
                       value: _settings.summaryThreshold,
                       min: 2,
                       max: 50,
@@ -249,10 +239,20 @@ class _AppSettingsPageState extends State<AppSettingsPage> {
                         _settings = _settings.copyWith(summaryThreshold: v);
                       }),
                     ),
+                    _buildNumberSetting(
+                      title: '超长期阈值（长期→超长期）',
+                      subtitle: '长期事件数 ≥ 此值时让 LLM 再压到超长期（默认: 5；调到 999 即可禁用超长期级联）',
+                      value: _settings.ultraSummaryThreshold,
+                      min: 2,
+                      max: 100,
+                      onChanged: (v) => setState(() {
+                        _settings = _settings.copyWith(ultraSummaryThreshold: v);
+                      }),
+                    ),
                     _buildSectionTitle('关联检索'),
                     _buildNumberSetting(
                       title: '检索深度',
-                      subtitle: '关联检索的邻居层级深度（默认：2）【暂时未使用】',
+                      subtitle: '关联检索的邻居层级深度（默认：2）',
                       value: _settings.searchDepth,
                       min: 1,
                       max: 5,
@@ -260,25 +260,14 @@ class _AppSettingsPageState extends State<AppSettingsPage> {
                         _settings = _settings.copyWith(searchDepth: v);
                       }),
                     ),
-                    _buildSectionTitle('综合搜索权重分配'),
                     _buildNumberSetting(
-                      title: '关键词匹配权重',
-                      subtitle: '综合评分中关键词匹配的权重百分比（默认：60%，与语义相似度权重之和应为 100%）',
-                      value: _settings.comprehensiveKeywordWeight,
+                      title: '向量相似度权重',
+                      subtitle: '向量记忆相似度评分在综合排序中的权重百分比（默认：80%）',
+                      value: _settings.vectorSimilarityWeight,
                       min: 0,
                       max: 100,
                       onChanged: (v) => setState(() {
-                        _settings = _settings.copyWith(comprehensiveKeywordWeight: v);
-                      }),
-                    ),
-                    _buildNumberSetting(
-                      title: '语义相似度权重',
-                      subtitle: '综合评分中语义相似度的权重百分比（默认：40%，与关键词匹配权重之和应为 100%）',
-                      value: _settings.comprehensiveSemanticWeight,
-                      min: 0,
-                      max: 100,
-                      onChanged: (v) => setState(() {
-                        _settings = _settings.copyWith(comprehensiveSemanticWeight: v);
+                        _settings = _settings.copyWith(vectorSimilarityWeight: v);
                       }),
                     ),
                     _buildSectionTitle('LRU 权重设置'),
@@ -345,6 +334,18 @@ class _AppSettingsPageState extends State<AppSettingsPage> {
                       onChanged: (v) => setState(() {
                         _settings =
                             _settings.copyWith(lruEventSettingNormalWeight: v);
+                      }),
+                    ),
+                    _buildSectionTitle('关键词库'),
+                    _buildNumberSetting(
+                      title: '关键词库容量',
+                      subtitle: '每个联系人保留的最大关键词数量（默认: 200）',
+                      value: _settings.keywordLibrarySize,
+                      min: 50,
+                      max: 1000,
+                      onChanged: (v) => setState(() {
+                        _settings =
+                            _settings.copyWith(keywordLibrarySize: v);
                       }),
                     ),
                     const SizedBox(height: 32),
