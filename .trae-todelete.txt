@@ -1,1 +1,0 @@
-ourcesappoutvsworkbenchcontribterminalcommonscriptssafe_rm_aliases.ps1\357\200\242 } catch{} ; Write-Output \357\200\242[Trae CN] Safe Rm alias is not enabled, try to fix it now.\357\200\242
