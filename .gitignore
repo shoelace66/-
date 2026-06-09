@@ -84,6 +84,10 @@ yarn-error.log
 apk_extract/
 apk_temp_extract/
 
+# 编辑器本地临时文件
+.trae-todelete.txt
+.trae-*
+
 # Dart
 .dart_tool/
 
