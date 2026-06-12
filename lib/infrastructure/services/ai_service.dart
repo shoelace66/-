@@ -22,7 +22,7 @@ class AiService {
     required String contactName,
   }) async {
     if (!ApiConstants.hasApiKey) {
-      return _mockReply(contactName: contactName, prompt: prompt);
+      throw const AiServiceException('请先设置 API Key。');
     }
 
     try {
@@ -69,7 +69,7 @@ class AiService {
   }) async {
     final uri = Uri.parse(url);
     final payload = <String, dynamic>{
-      'model': ApiConstants.model,
+      'model': ApiConstants.runtimeModel,
       'messages': <Map<String, String>>[
         <String, String>{
           'role': 'user',
@@ -148,13 +148,5 @@ class AiService {
       return 'API 服务暂时不可用（HTTP $status）。';
     }
     return 'API 请求失败（HTTP $status）。';
-  }
-
-  String _mockReply({required String contactName, required String prompt}) {
-    final safePrompt = prompt
-        .replaceAll('\\', '\\\\')
-        .replaceAll('"', '\\"')
-        .replaceAll('\n', ' ');
-    return '{"reply":"[$contactName] 占位回复：$safePrompt","memoryPatch":{"worldKnowledge":[],"selfKnowledge":[],"userKnowledge":[],"events":[],"belongings":[],"status":[],"mood":"","time":""}}';
   }
 }

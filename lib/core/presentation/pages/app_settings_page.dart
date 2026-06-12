@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
 
+import '../../constants/app_strings.dart';
 import '../../data/models/app_settings.dart';
 
 class AppSettingsPage extends StatefulWidget {
@@ -14,7 +15,7 @@ class AppSettingsPage extends StatefulWidget {
 }
 
 class _AppSettingsPageState extends State<AppSettingsPage> {
-  static const String _settingsKey = 'app_settings_v1';
+  static const String _settingsKey = AppStrings.appSettingsKey;
 
   AppSettings _settings = const AppSettings();
   bool _isLoading = true;

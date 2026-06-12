@@ -1,11 +1,23 @@
 enum ConnectionStatus { connected, reconnecting }
 
 class HeartbeatManager {
+  ConnectionStatus _status = ConnectionStatus.connected;
+  void Function(ConnectionStatus)? _onStatus;
+
+  ConnectionStatus get status => _status;
+
   void start(void Function(ConnectionStatus status) onStatus) {
-    onStatus(ConnectionStatus.connected);
+    _onStatus = onStatus;
+    _status = ConnectionStatus.connected;
+    onStatus(_status);
   }
 
-  void markReconnecting() {}
+  void markReconnecting() {
+    _status = ConnectionStatus.reconnecting;
+    _onStatus?.call(_status);
+  }
 
-  void stop() {}
+  void stop() {
+    _onStatus = null;
+  }
 }

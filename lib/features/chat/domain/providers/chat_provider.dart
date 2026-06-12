@@ -9,7 +9,6 @@ import '../../../../core/data/models/app_settings.dart';
 import '../../../../core/utils/chinese_tokenizer_service.dart';
 import '../../../../core/utils/structured_input_prompt_composer.dart';
 import '../../../../core/utils/structured_output_regex_parser.dart';
-import '../../../../core/utils/vector_memory_service.dart';
 import '../../../../infrastructure/services/ai_service.dart';
 import '../../../../infrastructure/services/opencode_service.dart';
 import '../../data/datasources/chat_local_storage.dart';
@@ -66,7 +65,7 @@ class ChatProvider extends ChangeNotifier {
   /// 加载应用设置
   Future<void> _loadAppSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('app_settings_v1');
+    final raw = prefs.getString(AppStrings.appSettingsKey);
     if (raw != null && raw.isNotEmpty) {
       try {
         final decoded = jsonDecode(raw);
@@ -79,7 +78,7 @@ class ChatProvider extends ChangeNotifier {
     }
 
     // 加载 opencode 连接配置
-    final opencodeRaw = prefs.getString('opencode_connection_v1');
+    final opencodeRaw = prefs.getString(AppStrings.opencodeConnectionKey);
     if (opencodeRaw != null && opencodeRaw.isNotEmpty) {
       try {
         final decoded = jsonDecode(opencodeRaw);
@@ -99,7 +98,7 @@ class ChatProvider extends ChangeNotifier {
     _opencodeService.updateConfig(config);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
-      'opencode_connection_v1',
+      AppStrings.opencodeConnectionKey,
       jsonEncode(config.toJson()),
     );
     notifyListeners();
@@ -167,11 +166,6 @@ class ChatProvider extends ChangeNotifier {
   /// 使用SharedPreferences存储联系人、消息历史、API设置等
   final ChatAgentStore _agentStore;
 
-  /// 向量记忆服务
-  ///
-  /// 用于存储和搜索向量嵌入的记忆
-  final VectorMemoryService _vectorMemory = VectorMemoryService();
-
   /// opencode CLI 交互服务
   ///
   /// 用于助手类型联系人，通过网络连接到运行 opencode 的 PC
@@ -210,6 +204,12 @@ class ChatProvider extends ChangeNotifier {
   /// API密钥
   String _apiKey = '';
 
+  /// API Base URL
+  String _apiBaseUrl = 'https://api.deepseek.com';
+
+  /// API Model
+  String _apiModel = 'deepseek-chat';
+
   /// 系统提示词
   ///
   /// 作为基础系统提示，会与联系人信息合并后发送给LLM
@@ -247,6 +247,12 @@ class ChatProvider extends ChangeNotifier {
 
   /// 获取当前API密钥
   String get currentApiKey => _apiKey;
+
+  /// 获取当前API Base URL
+  String get currentApiBaseUrl => _apiBaseUrl;
+
+  /// 获取当前API Model
+  String get currentApiModel => _apiModel;
 
   /// 获取当前系统提示词
   String get currentSystemPrompt => _systemPrompt;
@@ -291,14 +297,6 @@ class ChatProvider extends ChangeNotifier {
   /// 如果联系人列表为空，自动创建一个演示联系人
   Future<void> initialize() async {
     try {
-      // 初始化向量记忆服务
-      await _vectorMemory.initialize();
-    } catch (e) {
-      debugPrint('ChatProvider.initialize: 向量记忆服务初始化失败: $e');
-      // 继续初始化，不因为向量服务失败而中断
-    }
-
-    try {
       // 初始化中文分词服务
       await _tokenizer.init();
     } catch (e) {
@@ -310,8 +308,12 @@ class ChatProvider extends ChangeNotifier {
       // 加载Agent设置
       final settings = await _agentStore.readAgentSettings();
       _apiKey = (settings['apiKey'] ?? '').toString();
+      _apiBaseUrl = (settings['apiBaseUrl'] ?? 'https://api.deepseek.com').toString();
+      _apiModel = (settings['apiModel'] ?? 'deepseek-chat').toString();
       _systemPrompt = (settings['systemPrompt'] ?? _systemPrompt).toString();
       ApiConstants.runtimeApiKey = _apiKey;
+      ApiConstants.runtimeBaseUrl = _apiBaseUrl;
+      ApiConstants.runtimeModel = _apiModel;
     } catch (e) {
       debugPrint('ChatProvider.initialize: 加载设置失败: $e');
     }
@@ -340,14 +342,24 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 保存API密钥
+  /// 保存API配置
   ///
   /// 同时更新内存状态和持久化存储
-  Future<void> saveApiKey(String apiKey) async {
+  Future<void> saveApiConfig({
+    required String apiKey,
+    required String baseUrl,
+    required String model,
+  }) async {
     _apiKey = apiKey.trim();
+    _apiBaseUrl = baseUrl.trim().isEmpty ? 'https://api.deepseek.com' : baseUrl.trim();
+    _apiModel = model.trim().isEmpty ? 'deepseek-chat' : model.trim();
     ApiConstants.runtimeApiKey = _apiKey;
+    ApiConstants.runtimeBaseUrl = _apiBaseUrl;
+    ApiConstants.runtimeModel = _apiModel;
     final settings = await _agentStore.readAgentSettings();
     settings['apiKey'] = _apiKey;
+    settings['apiBaseUrl'] = _apiBaseUrl;
+    settings['apiModel'] = _apiModel;
     await _agentStore.saveAgentSettings(settings);
     notifyListeners();
   }
@@ -716,9 +728,6 @@ class ChatProvider extends ChangeNotifier {
     // 删除关联的消息记录
     _messagesByContact.remove(contactId);
 
-    // 删除关联的向量记忆数据（与事件队列同步清理）
-    await _vectorMemory.deleteContactMemories(contactId);
-
     // 如果删除的是当前选中的联系人，更新选中状态
     if (_selectedContactId == contactId) {
       if (_contacts.isNotEmpty) {
@@ -982,32 +991,6 @@ class ChatProvider extends ChangeNotifier {
         existingThemeLibrary: currentContact.themeLibrary,
       );
 
-      // 构建搜索查询（用户输入 + 关键词）
-      final query = _buildKeywordSearchInput(
-        userInput: userMessage.content,
-        keywords: keywords.mergedKeywords.isEmpty
-            ? (_tempKeywordsByContact[selected.id] ?? const <String>[])
-            : keywords.mergedKeywords,
-      );
-
-      // 向量搜索相关记忆（只搜索当前联系人的数据）
-      final similarMemories = await _vectorMemory.searchSimilar(
-        query,
-        3, // 取前3个最相似的记忆
-        type: 'message',
-        contactId: selected.id,
-      );
-
-      // 应用向量相似度权重
-      final weightedMemories = similarMemories.map((memory) {
-        final weightedScore =
-            memory.score * (_appSettings.vectorSimilarityWeight / 100);
-        return _ScoredMemory(memory: memory.entry, score: weightedScore);
-      }).toList();
-
-      // 按加权分数排序
-      weightedMemories.sort((a, b) => b.score.compareTo(a.score));
-
       // 步骤2: 构建Prompt联系人（包含筛选后的事件和知识）
       final promptContact = _buildPromptContact(currentContact,
           inputKeywords: keywords.mergedKeywords);
@@ -1146,14 +1129,6 @@ class ChatProvider extends ChangeNotifier {
       // 发送失败时回退记忆状态，但保留消息列表显示
       await _rollbackMemoryOnFailure(selected.id);
     } finally {
-      // 将消息添加到向量数据库（关联当前联系人）
-      await _vectorMemory.addMemoryEntry(
-        userMessage.id,
-        userMessage.content,
-        'message',
-        contactId: selected.id,
-      );
-
       isLoading = false;
       isTyping = false;
       notifyListeners();
@@ -1236,11 +1211,12 @@ class ChatProvider extends ChangeNotifier {
       return;
     }
 
-    // 更新消息状态为发送中
-    _updateMessageStatus(contactId, messageId, MessageStatus.sending);
+    // 移除失败的消息，避免重复
+    messages.removeAt(messageIndex);
+    await _agentStore.saveMessagesByContact(_messagesByContact);
     notifyListeners();
 
-    // 重新发送消息
+    // 重新发送
     await sendMessage(message.content);
   }
 
@@ -1307,25 +1283,6 @@ class ChatProvider extends ChangeNotifier {
 
     // 2. 恢复消息列表
     if (_lastMessagesSnapshot != null) {
-      // 获取当前消息列表，用于找出需要删除的向量数据
-      final currentMessages = _messagesByContact[contactId] ?? [];
-      final snapshotMessageIds =
-          _lastMessagesSnapshot!.map((m) => m.id).toSet();
-
-      // 找出本轮对话新增的消息ID（需要删除的向量数据）
-      final newMessageIds = currentMessages
-          .where((m) => !snapshotMessageIds.contains(m.id))
-          .map((m) => m.id)
-          .toList();
-
-      // 从向量数据库中删除新增的消息向量
-      for (final messageId in newMessageIds) {
-        await _vectorMemory.deleteMemoryEntry(messageId);
-      }
-
-      debugPrint(
-          '[recallLastTurn] 删除 ${newMessageIds.length} 条向量数据: $newMessageIds');
-
       _messagesByContact[contactId] = _lastMessagesSnapshot!;
     }
 
@@ -1364,28 +1321,7 @@ class ChatProvider extends ChangeNotifier {
       _contacts[idx] = _lastContactSnapshot!;
     }
 
-    // 2. 删除向量数据库中新增的消息向量
-    if (_lastMessagesSnapshot != null) {
-      final currentMessages = _messagesByContact[contactId] ?? [];
-      final snapshotMessageIds =
-          _lastMessagesSnapshot!.map((m) => m.id).toSet();
-
-      // 找出新增的消息ID
-      final newMessageIds = currentMessages
-          .where((m) => !snapshotMessageIds.contains(m.id))
-          .map((m) => m.id)
-          .toList();
-
-      // 删除向量数据
-      for (final messageId in newMessageIds) {
-        await _vectorMemory.deleteMemoryEntry(messageId);
-      }
-
-      debugPrint(
-          '[_rollbackMemoryOnFailure] 删除 ${newMessageIds.length} 条向量数据: $newMessageIds');
-    }
-
-    // 3. 持久化恢复后的 Contact 状态
+    // 2. 持久化恢复后的 Contact 状态
     await _agentStore.saveContacts(_contacts);
 
     // 注意：不清空快照，以便用户可以重发
@@ -2090,15 +2026,6 @@ class ChatProvider extends ChangeNotifier {
   /// 构建关键词搜索输入
   ///
   /// 将用户输入和关键词合并，用于事件搜索
-  String _buildKeywordSearchInput({
-    required String userInput,
-    required List<String> keywords,
-  }) {
-    final input = userInput.trim();
-    if (keywords.isEmpty) return input;
-    return '$input\n${keywords.join(' ')}';
-  }
-
   /// 从LLM响应中解析关键词和主题列表
   _KeywordAndTheme _parseKeywordsAndThemeFromRaw(String raw) {
     final payload = StructuredOutputRegexParser.parsePrimaryPayload(raw);
@@ -2417,13 +2344,6 @@ class ChatProvider extends ChangeNotifier {
 
     // 获取被截断的事件（超出 maxSize 的部分）
     final truncatedEvents = newQueue.skip(maxSize).toList();
-
-    // 异步删除这些事件对应的向量数据
-    for (final eventNode in truncatedEvents) {
-      _vectorMemory.deleteMemoryEntry(eventNode.id);
-    }
-
-    print('LRU截断: 删除 ${truncatedEvents.length} 个超长事件的向量数据');
   }
 
   /// 添加边关系到事件图
@@ -2818,12 +2738,4 @@ class _BelongingPatchItem {
 
   /// 物品名称
   final String name;
-}
-
-/// 带权重的记忆条目
-class _ScoredMemory {
-  final VectorMemoryEntity memory;
-  final double score;
-
-  _ScoredMemory({required this.memory, required this.score});
 }

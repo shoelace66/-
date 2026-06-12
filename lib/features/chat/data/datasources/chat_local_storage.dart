@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../../core/constants/app_strings.dart';
 import '../models/contact.dart';
 import '../models/message.dart';
 
@@ -15,9 +16,9 @@ import '../models/message.dart';
 /// 注意：SharedPreferences 在安卓端使用 XML 文件存储，
 /// 位于 /data/data/<package_name>/shared_prefs/ 目录下
 class ChatAgentStore {
-  static const String _settingsKey = 'chat_settings_v1';
-  static const String _contactsKey = 'chat_contacts_v1';
-  static const String _messagesKey = 'chat_messages_v1';
+  static const String _settingsKey = AppStrings.chatSettingsKey;
+  static const String _contactsKey = AppStrings.chatContactsKey;
+  static const String _messagesKey = AppStrings.chatMessagesKey;
   static const Map<String, dynamic> _defaultSettings = <String, dynamic>{
     'apiKey': '',
     'systemPrompt': '你是一个AI角色扮演对话助手，专注于沉浸式对话体验。',

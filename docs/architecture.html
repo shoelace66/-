@@ -64,14 +64,14 @@
 
   <header style="margin-bottom: 8px;">
     <span class="tag">v2.0.5</span>
-    <span class="tag tag-warn">Flutter 3.41 · Dart 3.4+</span>
+    <span class="tag tag-warn">Flutter 3.136 · Dart 3.4+</span>
     <h1 class="font-serif">AI 角色扮演对话应用</h1>
-    <p class="lede">基于 Flutter 的本地 AI 对话引擎：长期记忆、关键词召回 + 事件图 BFS、三级级联、opencode 助手桥接。本文梳理各模块的实际数据流（不含未启用的预留扩展位）。</p>
+    <p class="lede">基于 Flutter 的本地 AI 对话引擎：长期记忆、关键词召回 + 事件图 BFS、三级级联、opencode 助手桥接。</p>
   </header>
 
   <h2 class="font-serif">整体架构</h2>
   <div class="card" style="margin-bottom: 16px;">
-    <p style="margin-bottom: 0;"><strong>分层</strong>：UI → ChatProvider（ChangeNotifier）→ 服务层（<code>AiService</code> / <code>OpencodeService</code> / <code>ChatAgentStore</code> / <code>StructuredInputPromptComposer</code> / <code>StructuredOutputRegexParser</code> / <code>ChineseTokenizerService</code>）→ 外部（LLM HTTP API、opencode、SharedPreferences）。<br/><strong>预留位</strong>：<code>VectorMemoryService</code> 留有 <code>addMemoryEntry</code> / <code>searchSimilar</code> 接口，但当前 searchSimilar 结果<strong>未参与</strong> prompt 拼装。</p>
+    <p style="margin-bottom: 0;"><strong>分层</strong>：UI → ChatProvider（ChangeNotifier）→ 服务层（<code>AiService</code> / <code>OpencodeService</code> / <code>ChatAgentStore</code> / <code>StructuredInputPromptComposer</code> / <code>StructuredOutputRegexParser</code> / <code>ChineseTokenizerService</code>）→ 外部（LLM HTTP API、opencode、SharedPreferences）。</p>
   </div>
 
   <div class="mermaid">
@@ -90,7 +90,6 @@ graph LR
   subgraph Svc["服务层"]
     C1[AiService<br/>HTTP LLM]
     C2[OpencodeService<br/>HTTP opencode]
-    C3[VectorMemoryService<br/>预留位]
     C4[ChatAgentStore<br/>SharedPreferences]
     C5[StructuredInput<br/>PromptComposer]
     C6[StructuredOutput<br/>RegexParser]
@@ -101,7 +100,6 @@ graph LR
     D1[LLM API<br/>chat/completions]
     D2[opencode serve<br/>:4096]
     D3[SharedPreferences<br/>chat_contacts_v1.xml]
-    D4[Documents/<br/>vector_memory.json<br/>预留位]
   end
 
   A1 --> B1
@@ -110,7 +108,6 @@ graph LR
   A4 --> B1
   B1 --> C1
   B1 --> C2
-  B1 --> C3
   B1 --> C4
   B1 --> C5
   B1 --> C6
@@ -118,7 +115,6 @@ graph LR
   C1 --> D1
   C2 --> D2
   C4 --> D3
-  C3 --> D4
   </div>
 
   <h2 class="font-serif">角色对话：单轮数据流</h2>
@@ -132,7 +128,6 @@ sequenceDiagram
     participant H as Heartbeat<br/>Manager
     participant FS as Input<br/>Formatter
     participant KW as Keyword<br/>Extraction
-    participant VM as Vector<br/>Memory
     participant CO as Composer
     participant AS as AiService
     participant LL as LLM
@@ -152,9 +147,6 @@ sequenceDiagram
     AS-->>KW: 关键词+主题
     KW-->>CP: localKeywords / llmKeywords / mergedKeywords
 
-    CP-->>VM: searchSimilar(query, top=3)
-    Note right of VM: 虚线 = 当前未参与 prompt 拼装<br/>属预留扩展位
-
     CP->>CO: composeSystemPromptWithContactObject
     Note over CO: 拼接 固定输入/记忆/状态/联想<br/>+ needSummary 时的待总结事件
     CO-->>CP: systemPrompt
@@ -172,7 +164,6 @@ sequenceDiagram
       CP->>CP: _updateContactFromMemoryPatch
       Note over CP: 合并知识 / 事件 → short-term /<br/>summary? → long-term /<br/>belongings / currentStates /<br/>LRU 排序 / 边关系
       CP->>SP: saveContacts + saveMessagesByContact
-      CP->>VM: addMemoryEntry(userMessage)
     else 提取失败
       CP-->>U: error="AI 回复格式错误"
     end
@@ -286,9 +277,9 @@ sequenceDiagram
     <tr><th>数据</th><th>存储</th><th>位置</th></tr>
     <tr><td>联系人 (含 eventGraph)</td><td>SharedPreferences</td><td>chat_contacts_v1</td></tr>
     <tr><td>消息历史</td><td>SharedPreferences</td><td>chat_messages_v1</td></tr>
+    <tr><td>Agent 设置</td><td>SharedPreferences</td><td>chat_settings_v1</td></tr>
     <tr><td>App 设置</td><td>SharedPreferences</td><td>app_settings_v1</td></tr>
     <tr><td>opencode 连接配置</td><td>SharedPreferences</td><td>opencode_connection_v1</td></tr>
-    <tr><td>向量记忆（预留位）</td><td>JSON 文件</td><td>应用 Documents 目录/vector_memory.json</td></tr>
   </table>
 
   <h2 class="font-serif">远程连接（PC 上的 opencode）</h2>
@@ -308,10 +299,9 @@ sequenceDiagram
     </div>
   </div>
 
-  <h2 class="font-serif">已知限制 / 预留位</h2>
+  <h2 class="font-serif">已知限制</h2>
   <ul>
-    <li><code>VectorMemoryService</code> 留有 <code>addMemoryEntry</code> / <code>searchSimilar</code> 接口，<strong>searchSimilar 结果当前未参与 prompt 拼装</strong>（<code>_buildPromptContact</code> 没消费 <code>weightedMemories</code>）。<code>addMemoryEntry</code> 在每轮发送后入库是真实运行；<code>vectorSimilarityWeight</code> 设置保留但暂未生效</li>
-    <li><code>_simpleEmbedding</code> 走字符级 <code>codeUnit</code> 累加 + 余弦相似度，<strong>非真语义</strong>；<code>tflite_flutter</code> 已在 pubspec 里但未挂接真模型（属未来升级点）</li>
+    <li><code>VectorMemoryService</code> 代码仍在但完全未接入，Dart 生态无合适向量数据库和 embedding 模型。可安全删除</li>
     <li><code>legacy events: EventLruBucket</code> 仍在写但 prompt 只读 <code>eventGraph</code>，旧字段累积是冗余</li>
     <li>SSH 模式在 <code>OpencodeService._executeViaSsh</code> 里直接返回"不可用"占位，HTTP 模式才是主路径</li>
     <li>opencode 的 <code>POST /session/:id/message</code> 是同步等待；AI 任务长时（&gt;300s）可能撞默认超时，可在设置里调</li>

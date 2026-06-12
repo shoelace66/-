@@ -60,6 +60,8 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> _openApiSettingDialog() async {
     final keyCtrl = TextEditingController(text: _provider.currentApiKey);
+    final baseUrlCtrl = TextEditingController(text: _provider.currentApiBaseUrl);
+    final modelCtrl = TextEditingController(text: _provider.currentApiModel);
     final promptCtrl = TextEditingController(
       text: _provider.currentSystemPrompt,
     );
@@ -80,6 +82,22 @@ class _ChatPageState extends State<ChatPage> {
                   decoration: const InputDecoration(
                     labelText: 'API Key',
                     hintText: '请输入 API Key',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: baseUrlCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Base URL',
+                    hintText: 'https://api.deepseek.com',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: modelCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Model',
+                    hintText: 'deepseek-chat',
                   ),
                 ),
                 const SizedBox(height: 10),
@@ -105,6 +123,8 @@ class _ChatPageState extends State<ChatPage> {
                 Navigator.of(context).pop(
                   ApiConfigDraft(
                     apiKey: keyCtrl.text,
+                    baseUrl: baseUrlCtrl.text,
+                    model: modelCtrl.text,
                     systemPrompt: promptCtrl.text,
                   ),
                 );
@@ -117,7 +137,11 @@ class _ChatPageState extends State<ChatPage> {
     );
 
     if (result == null) return;
-    await _provider.saveApiKey(result.apiKey);
+    await _provider.saveApiConfig(
+      apiKey: result.apiKey,
+      baseUrl: result.baseUrl,
+      model: result.model,
+    );
     await _provider.saveSystemPrompt(result.systemPrompt);
     if (!mounted) return;
     ScaffoldMessenger.of(
@@ -771,9 +795,16 @@ class _ChatPageState extends State<ChatPage> {
 }
 
 class ApiConfigDraft {
-  const ApiConfigDraft({required this.apiKey, required this.systemPrompt});
+  const ApiConfigDraft({
+    required this.apiKey,
+    required this.baseUrl,
+    required this.model,
+    required this.systemPrompt,
+  });
 
   final String apiKey;
+  final String baseUrl;
+  final String model;
   final String systemPrompt;
 }
 

@@ -2,7 +2,7 @@
 
 > 基于 Flutter 的本地 AI 角色/故事对话应用：长期记忆、关键词召回 + 事件图 BFS、三级级联、opencode 助手桥接。
 
-[![Flutter](https://img.shields.io/badge/Flutter-3.41-02569B)](.) [![Dart](https://img.shields.io/badge/Dart-3.4%2B-0175C2)](.) [![License](https://img.shields.io/badge/license-private-lightgrey)](.)
+[![Flutter](https://img.shields.io/badge/Flutter-3.136-02569B)](.) [![Dart](https://img.shields.io/badge/Dart-3.4%2B-0175C2)](.) [![License](https://img.shields.io/badge/license-private-lightgrey)](.)
 
 ---
 
@@ -28,7 +28,7 @@
 - **三种创建方式**：表单 / JSON 导入 / 自然语言描述（LLM 转 JSON）
 - **撤回最近一轮**：基于 snapshot，可恢复消息列表 + 联系人
 - **调试模式**：显示完整 prompt + 关键词提取结果
-- **应用设置**：21 项可调（详见 [应用设置](#应用设置)）
+- **应用设置**：20 项可调（详见 [应用设置](#应用设置)）
 
 ## 项目结构
 
@@ -37,8 +37,8 @@ lib/
 ├── main.dart, app.dart              # 入口
 ├── features/chat/
 │   ├── domain/
-│   │   ├── providers/chat_provider.dart     # 核心状态机 (~2800 行)
-│   │   └── services/{heartbeat,input_formatter}.dart
+│   │   ├── providers/chat_provider.dart     # 核心状态机 (~2500 行)
+│   │   └── services/{heartbeat_manager,input_formatter}.dart
 │   ├── data/
 │   │   ├── models/{contact,message}.dart    # 联系人（含 eventGraph）、消息
 │   │   ├── repositories/chat_repository.dart
@@ -47,12 +47,13 @@ lib/
 │       ├── pages/chat_page.dart              # 主聊天界面
 │       └── widgets/{contact_sidebar,contact_editor_dialog}.dart
 ├── core/
+│   ├── constants/{api_constants,app_strings}.dart
 │   ├── data/models/app_settings.dart
 │   ├── presentation/pages/{app_settings,assistant_config}_page.dart
 │   └── utils/
 │       ├── structured_input_prompt_composer.dart  # prompt 拼接
 │       ├── structured_output_regex_parser.dart    # JSON 解析
-│       ├── vector_memory_service.dart              # 向量记忆（预留扩展位：searchSimilar 未参与 prompt 拼装）
+│       ├── vector_memory_service.dart              # 向量记忆（已废弃，Dart 生态无合适向量库）
 │       └── chinese_tokenizer_service.dart          # jieba
 └── infrastructure/services/
     ├── ai_service.dart        # LLM HTTP 客户端
@@ -67,7 +68,6 @@ sequenceDiagram
     actor U as User
     participant CP as ChatProvider
     participant KW as Keyword Extract
-    participant VM as Vector Memory
     participant CO as Composer
     participant AS as AiService
     participant LL as LLM
@@ -78,9 +78,7 @@ sequenceDiagram
     CP->>CP: _saveSnapshot(contact)
     CP->>KW: jieba 本地 + LLM 抽取
     KW-->>CP: keywords + theme
-    Note over CP: 相关事件: relatedEventsForPrompt(keywords, depth)<br/>BFS 邻居检索（已加 prompt）
-    CP-->>VM: searchSimilar(top 3)
-    Note right of VM: 虚线 = 当前未参与 prompt 拼装<br/>属预留扩展位（见已知限制）
+    Note over CP: 相关事件: relatedEventsForPrompt(keywords, depth)<br/>BFS 邻居检索
     CP->>CO: composeSystemPromptWithContactObject
     CO-->>CP: systemPrompt
     CP->>AS: askAi(prompt)
@@ -91,7 +89,6 @@ sequenceDiagram
     CP->>CP: _updateContactFromMemoryPatch
     Note over CP: 合并知识 / 事件 → short-term /<br/>summary? → long-term /<br/>belongings / states / edges / LRU
     CP->>SP: saveContacts + saveMessagesByContact
-    CP->>VM: addMemoryEntry(userMessage)
     CP-->>U: UI 刷新
 ```
 
@@ -160,11 +157,11 @@ sequenceDiagram
 | **Cloudflare Tunnel** | `cloudflared tunnel --url http://localhost:4096` | host=trycloudflare.com, port=443, https ✓ | 零配置，URL 每次启动会变 |
 | **VPS SSH 反代** | `ssh -R 14096:127.0.0.1:4096 user@vps` | host=VPS 公网 IP, port=14096, http | 灵活但 VPS 自身是攻击面 |
 
-> PC 启动：`opencode web --hostname 0.0.0.0 --port 4096`（建议 `export OPENCODE_SERVER_PASSWORD=xxx`）
+> PC 启动：`opencode serve --hostname 0.0.0.0 --port 4096`（建议 `export OPENCODE_SERVER_PASSWORD=xxx`）
 
 ## 应用设置
 
-应用设置页（右上角齿轮）共 21 项，分 6 组：
+应用设置页（右上角齿轮）共 20 项，分 6 组：
 
 | 分组 | 设置 | 默认 | 范围 |
 |---|---|---|---|
@@ -180,7 +177,7 @@ sequenceDiagram
 | **事件处理** | summaryThreshold | 10 | 2-50 |
 | | ultraSummaryThreshold | 5 | 2-100（设 999 禁用 2→3） |
 | **关联检索** | searchDepth | 2 | 1-5（BFS 跳数） |
-| | vectorSimilarityWeight | 80 | 0-100（当前未启用，保留作未来扩展位） |
+| | vectorSimilarityWeight | 80 | 0-100（已废弃，向量记忆未启用） |
 | **LRU 权重** | lruKeywordMatchWeight | 100 | 1-500 |
 | | lruEventEventWeight | 50 | 1-300 |
 | | lruEventBelongingKeywordWeight | 30 | 1-200 |
@@ -195,25 +192,23 @@ sequenceDiagram
 |---|---|---|
 | 联系人（含 eventGraph） | SharedPreferences | `chat_contacts_v1` |
 | 消息历史 | SharedPreferences | `chat_messages_v1` |
-| App 设置 | SharedPreferences | `app_settings_v1` |
+| Agent 设置（API Key、系统提示词） | SharedPreferences | `chat_settings_v1` |
+| App 设置（20 项参数） | SharedPreferences | `app_settings_v1` |
 | opencode 连接配置 | SharedPreferences | `opencode_connection_v1` |
-| 向量记忆（预留） | JSON 文件 | `<app Documents>/vector_memory.json` |
 
 > 安卓设备查看：`adb pull /data/data/<package>/shared_prefs/`
 
 ## 已知限制
 
-- **向量记忆是预留扩展位**：`VectorMemoryService.searchSimilar` 算出的结果目前**未参与 prompt 拼装**（`_buildPromptContact` 没消费 `weightedMemories`）。`addMemoryEntry` 在每轮发送后入库是真实运行；`vectorSimilarityWeight` 设置保留但暂未生效
-- **字符级伪向量**：`_simpleEmbedding` 走 `codeUnit` 累加 + 余弦相似度，不是真语义；`tflite_flutter` 已在 `pubspec.yaml` 但未挂接真模型（属于未来升级点）
+- **向量记忆已废弃**：`VectorMemoryService` 代码仍在但完全未接入，Dart 生态无合适向量数据库和 embedding 模型。`vectorSimilarityWeight` 设置同理。可安全删除 `vector_memory_service.dart` 及相关引用
 - `legacy events: EventLruBucket` 仍在写但 prompt 实际只读 `eventGraph`，旧字段是冗余
 - SSH 模式在 `OpencodeService._executeViaSsh` 里是占位，**实际只支持 HTTP**
 - opencode 的 `POST /session/:id/message` 是同步等待；超长 AI 任务（>300s）会撞默认超时
-- `comprehensiveKeywordWeight` / `comprehensiveSemanticWeight` 字段已删除（之前是规划未落地的"综合搜索"功能）
 
 ## 构建
 
 ```bash
-# 1. 安装 Flutter SDK 3.41+、Dart 3.4+
+# 1. 安装 Flutter SDK 3.136+、Dart 3.4+
 # 2. 拉依赖
 flutter pub get
 
@@ -227,7 +222,7 @@ flutter build apk --release
 
 ## 下载
 
-预编译的 release APK 不入库(避免仓库膨胀),在 GitHub Releases 分发:
+预编译的 release APK 不入库（避免仓库膨胀），在 GitHub Releases 分发：
 
 👉 **[Releases 页面](https://github.com/shoelace66/ai_roleplay_chat/releases)** — 下载 `app-release.apk` 后直接安装。
 
@@ -237,8 +232,6 @@ flutter build apk --release
 
 - `http: ^1.2.2` — LLM / opencode HTTP 客户端
 - `shared_preferences: ^2.5.3` — 本地 KV 存储
-- `path_provider: ^2.1.5` — 应用文档目录（vector_memory.json 预留位用）
-- `tflite_flutter: ^0.10.4` — 已声明但**目前未挂接且未在路径上使用**（见已知限制）
 - `jieba_flutter: ^0.2.0` — 中文分词
 
 ---

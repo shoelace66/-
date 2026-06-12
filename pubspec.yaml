@@ -11,8 +11,6 @@ dependencies:
     sdk: flutter
   http: ^1.2.2
   shared_preferences: ^2.5.3
-  path_provider: ^2.1.5
-  tflite_flutter: ^0.10.4
   jieba_flutter: ^0.2.0
 
 dev_dependencies:
