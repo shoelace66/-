@@ -43,6 +43,48 @@ class StructuredOutputRegexParser {
     return reply;
   }
 
+  /// Extracts the currently available prefix of a streamed JSON `reply`.
+  /// Incomplete escape sequences are ignored until the next chunk arrives.
+  static String? extractPartialReply(String raw) {
+    final match = RegExp(r'"reply"\s*:\s*"').firstMatch(raw);
+    if (match == null) return null;
+    final output = StringBuffer();
+    var index = match.end;
+    while (index < raw.length) {
+      final code = raw.codeUnitAt(index);
+      if (code == 34) break;
+      if (code != 92) {
+        output.writeCharCode(code);
+        index++;
+        continue;
+      }
+      if (index + 1 >= raw.length) break;
+      final escaped = raw.codeUnitAt(index + 1);
+      if (escaped == 117) {
+        if (index + 6 > raw.length) break;
+        final hex = raw.substring(index + 2, index + 6);
+        final value = int.tryParse(hex, radix: 16);
+        if (value == null) break;
+        output.writeCharCode(value);
+        index += 6;
+        continue;
+      }
+      const escapes = <int, int>{
+        34: 34,
+        47: 47,
+        92: 92,
+        98: 8,
+        102: 12,
+        110: 10,
+        114: 13,
+        116: 9,
+      };
+      output.writeCharCode(escapes[escaped] ?? escaped);
+      index += 2;
+    }
+    return output.toString();
+  }
+
   static Map<String, dynamic>? extractMemoryPatch(String raw) {
     final parsed = parsePrimaryPayload(raw);
     final patch = parsed?['memoryPatch'];

@@ -2,7 +2,7 @@
 
 > 基于 Flutter 的本地 AI 角色/故事对话应用：长期记忆、关键词召回 + 事件图 BFS、三级级联、opencode 助手桥接。
 
-[![Flutter](https://img.shields.io/badge/Flutter-3.136-02569B)](.) [![Dart](https://img.shields.io/badge/Dart-3.4%2B-0175C2)](.) [![License](https://img.shields.io/badge/license-private-lightgrey)](.)
+[![Flutter](https://img.shields.io/badge/Flutter-3.41.2-02569B)](.) [![Dart](https://img.shields.io/badge/Dart-3.11%2B-0175C2)](.) [![License](https://img.shields.io/badge/license-private-lightgrey)](.)
 
 ---
 
@@ -27,6 +27,19 @@
 - **事件间边关系**：LLM 通过 `relatedEventIds` 声明强关联，**硬上限 2 个**；LRU 排序按关键词 + 邻居 + 物品/设定 关联权重综合打分
 - **三种创建方式**：表单 / JSON 导入 / 自然语言描述（LLM 转 JSON）
 - **撤回最近一轮**：基于 snapshot，可恢复消息列表 + 联系人
+- **流式输出与停止**：OpenAI 兼容 SSE 流式回复逐块显示；流式/非流式请求均可立即停止并保留明确状态
+- **消息操作与候选回复**：支持复制、引用、编辑、删除，以及为任意消息生成、保存和切换候选回复
+- **停止与安全重生成**：可修改上一轮输入，在完整撤回旧回复和旧记忆后重新生成
+- **会话搜索与用量估算**：搜索完整会话历史、预览上下文，并估算当前窗口 Token 与费用
+- **多 LLM Profile**：可保存多个 Profile、快速切换、批量健康检查，并在主 Profile 失败时自动 fallback
+- **可视化记忆档案**：三标签页（列表/时间线/召回调试），按层级和状态筛选，关键词搜索，来源对话追踪，每条记忆的事件关系边和邻居节点可视化，完整召回调试信息展示
+- **世界书系统**：地点、组织、规则、时间线事件的独立管理，四标签页 UI，自动注入 LLM Prompt 作为角色行为参考
+- **图片画廊与缓存**：生图自动缓存到本地文件系统，LRU 淘汰；网格画廊支持角色筛选、全屏预览；角色外观一致性算法（特征签名 + 种子锁定 + 参考图）确保同一角色图片风格一致
+- **TTS 音色与播放**：联系人编辑页可试听音色，聊天消息可拉取真实音频并通过系统媒体播放器播放/停止
+- **SQLite 本地数据库**：联系人、消息、三级事件、边和关系队列规范化存储，一轮对话原子提交
+- **万级消息分页**：启动只载入当前会话最近 100 条，可向前加载；完整备份仍包含全部历史
+- **剧情检查点与分支**：成功轮次自动建立可逆检查点，可从历史回复创建、切换、重命名和备份剧情分支
+- **完整本地备份**：版本化 JSON 备份角色、消息和事件图；恢复不会覆盖 API、模型和应用设置
 - **调试模式**：显示完整 prompt + 关键词提取结果
 - **应用设置**：20 项可调（详见 [应用设置](#应用设置)）
 
@@ -35,17 +48,26 @@
 ```
 lib/
 ├── main.dart, app.dart              # 入口
-├── features/chat/
-│   ├── domain/
-│   │   ├── providers/chat_provider.dart     # 核心状态机 (~2500 行)
-│   │   └── services/{heartbeat_manager,input_formatter}.dart
-│   ├── data/
-│   │   ├── models/{contact,message}.dart    # 联系人（含 eventGraph）、消息
-│   │   ├── repositories/chat_repository.dart
-│   │   └── datasources/chat_local_storage.dart  # SharedPreferences
-│   └── presentation/
-│       ├── pages/chat_page.dart              # 主聊天界面
-│       └── widgets/{contact_sidebar,contact_editor_dialog}.dart
+├── features/
+│   ├── chat/
+│   │   ├── domain/
+│   │   │   ├── providers/chat_provider.dart     # 页面状态与用例编排
+│   │   │   ├── repositories/chat_persistence.dart
+│   │   │   └── services/                        # 记忆、召回、修订、角色/故事策略
+│   │   ├── data/
+│   │   │   ├── models/{contact,message}.dart    # 联系人（含 eventGraph、worldBook）、消息
+│   │   │   ├── repositories/chat_repository.dart
+│   │   │   └── datasources/                     # SQLite 主存储 + 旧数据只读迁移源
+│   │   └── presentation/
+│   │       ├── pages/chat_page.dart              # 主聊天界面
+│   │       └── widgets/{contact_sidebar,contact_editor_dialog}.dart
+│   └── worldbook/
+│       ├── domain/entities/                      # WorldLocation, WorldOrganization, WorldRule, WorldTimelineEvent
+│       ├── domain/services/                      # WorldBookService（CRUD + 搜索）
+│       └── presentation/pages/                   # 世界书四标签页 UI
+│   └── media/
+│       ├── domain/services/                      # ImageCacheService（本地缓存 + LRU 淘汰）
+│       └── presentation/pages/                   # 图片画廊（网格 + 全屏预览）
 ├── core/
 │   ├── constants/{api_constants,app_strings}.dart
 │   ├── data/models/app_settings.dart
@@ -53,7 +75,6 @@ lib/
 │   └── utils/
 │       ├── structured_input_prompt_composer.dart  # prompt 拼接
 │       ├── structured_output_regex_parser.dart    # JSON 解析
-│       ├── vector_memory_service.dart              # 向量记忆（已废弃，Dart 生态无合适向量库）
 │       └── chinese_tokenizer_service.dart          # jieba
 └── infrastructure/services/
     ├── ai_service.dart        # LLM HTTP 客户端
@@ -71,7 +92,7 @@ sequenceDiagram
     participant CO as Composer
     participant AS as AiService
     participant LL as LLM
-    participant SP as SharedPreferences
+    participant DB as SQLite
     participant PR as Parser
 
     U->>CP: sendMessage(text)
@@ -88,7 +109,7 @@ sequenceDiagram
     CP->>PR: extractReply + extractMemoryPatch
     CP->>CP: _updateContactFromMemoryPatch
     Note over CP: 合并知识 / 事件 → short-term /<br/>summary? → long-term /<br/>belongings / states / edges / LRU
-    CP->>SP: saveContacts + saveMessagesByContact
+    CP->>DB: 同一事务提交联系人、事件图与消息
     CP-->>U: UI 刷新
 ```
 
@@ -190,25 +211,29 @@ sequenceDiagram
 
 | 数据 | 存储 | Key |
 |---|---|---|
-| 联系人（含 eventGraph） | SharedPreferences | `chat_contacts_v1` |
-| 消息历史 | SharedPreferences | `chat_messages_v1` |
+| 联系人 | SQLite | `contacts` |
+| 消息历史 | SQLite | `messages` |
+| 三级事件 | SQLite | `event_nodes` |
+| 事件边和物品/设定关系 | SQLite | `event_edges` / `event_relations` |
+| 记忆图元数据 | SQLite | `memory_meta` |
 | Agent 设置（API Key、系统提示词） | SharedPreferences | `chat_settings_v1` |
 | App 设置（20 项参数） | SharedPreferences | `app_settings_v1` |
 | opencode 连接配置 | SharedPreferences | `opencode_connection_v1` |
 
-> 安卓设备查看：`adb pull /data/data/<package>/shared_prefs/`
+旧版 SharedPreferences 联系人和消息会在首次启动时校验并迁移到 SQLite；迁移成功后旧数据不会被主动删除，可作为回退副本。
 
 ## 已知限制
 
-- **向量记忆已废弃**：`VectorMemoryService` 代码仍在但完全未接入，Dart 生态无合适向量数据库和 embedding 模型。`vectorSimilarityWeight` 设置同理。可安全删除 `vector_memory_service.dart` 及相关引用
-- `legacy events: EventLruBucket` 仍在写但 prompt 实际只读 `eventGraph`，旧字段是冗余
+- **向量记忆未启用**：当前采用 jieba 关键词 + 事件图 BFS；旧数据兼容仍保留 `vectorSimilarityWeight` 设置字段，但运行时不使用
+- **任意历史消息完整重生成未完成**：当前完整撤回并重生成只支持最近一轮；任意消息已支持候选回复与从检查点创建分支
+- **语音输入/音频消息/字幕未完成**：当前已完成 TTS 音色配置、真实播放和停止
 - SSH 模式在 `OpencodeService._executeViaSsh` 里是占位，**实际只支持 HTTP**
 - opencode 的 `POST /session/:id/message` 是同步等待；超长 AI 任务（>300s）会撞默认超时
 
 ## 构建
 
 ```bash
-# 1. 安装 Flutter SDK 3.136+、Dart 3.4+
+# 1. 安装 Flutter SDK 3.41.2、Dart 3.11+
 # 2. 拉依赖
 flutter pub get
 
@@ -222,16 +247,18 @@ flutter build apk --release
 
 ## 下载
 
-预编译的 release APK 不入库（避免仓库膨胀），在 GitHub Releases 分发：
+正式版本通过 GitHub Releases 分发；本地验收构建同时放在 `releases/app-release.apk`：
 
 👉 **[Releases 页面](https://github.com/shoelace66/ai_roleplay_chat/releases)** — 下载 `app-release.apk` 后直接安装。
 
-> 如果从旧版本升级,建议先在 App 内导出联系人/消息 JSON(设置 → 导出),再装新 APK 导入,避免 SharedPreferences schema 升级时丢数据。
+> 从旧版本升级前，建议先在聊天页右上角打开“本地备份”，复制完整备份。新版本会自动把旧 SharedPreferences 联系人和消息迁移到 SQLite。
 
 ## 依赖
 
-- `http: ^1.2.2` — LLM / opencode HTTP 客户端
-- `shared_preferences: ^2.5.3` — 本地 KV 存储
+- `audioplayers: 6.5.1` — TTS 音频字节的 Android/桌面系统播放
+- `http: 1.6.0` — LLM / opencode HTTP 客户端
+- `shared_preferences: 2.5.4` — 本地 KV 存储
+- `sqflite: 2.4.2+1` — Android/iOS 本地关系数据库
 - `jieba_flutter: ^0.2.0` — 中文分词
 
 ---

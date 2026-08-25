@@ -3,156 +3,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
-/// 连接方式
-enum ConnectionType {
-  /// HTTP API 代理（推荐，在 PC 上运行代理服务）
-  http,
-
-  /// SSH 连接（需要 SSH 密钥或密码）
-  ssh,
-}
-
-/// opencode 连接配置
-class OpencodeConnectionConfig {
-  const OpencodeConnectionConfig({
-    this.type = ConnectionType.http,
-    this.host = '127.0.0.1',
-    this.port = 4096,
-    this.useHttps = false,
-    this.basePath = '',
-    this.sshUser = '',
-    this.sshPassword = '',
-    this.sshKeyPath = '',
-    this.opencodePath = 'opencode',
-    this.workingDirectory = '',
-    this.timeoutSeconds = 300,
-    this.username = 'opencode',
-    this.password = '',
-    this.agent = 'build',
-    this.providerID = '',
-    this.modelID = '',
-    this.sessionId = '',
-  });
-
-  final ConnectionType type;
-  final String host;
-  final int port;
-
-  /// 是否走 HTTPS
-  ///
-  /// - false（默认）：用 `http://host:port` —— 适合 localhost / Tailscale / SSH 反向隧道
-  /// - true：用 `https://host:port` —— 适合 cloudflare tunnel、自建 HTTPS 反代、公网域名
-  ///
-  /// 注：Android 9+ 默认禁明文 HTTP；走 HTTP 时 APK 已配置 network_security_config
-  /// 放行常见场景（Tailscale、私有 IP 等）
-  final bool useHttps;
-
-  /// 路径前缀，便于把 opencode 放在反向代理子路径下
-  /// 留空表示直接挂在根路径
-  final String basePath;
-  final String sshUser;
-  final String sshPassword;
-  final String sshKeyPath;
-  final String opencodePath;
-  final String workingDirectory;
-  final int timeoutSeconds;
-
-  /// HTTP Basic Auth 用户名（opencode 默认是 `opencode`）
-  final String username;
-
-  /// HTTP Basic Auth 密码（对应 `OPENCODE_SERVER_PASSWORD`）
-  /// 留空表示不发送鉴权头
-  final String password;
-
-  /// opencode agent 名称（如 `build`、`plan`），对应请求体里的 `agent` 字段
-  final String agent;
-
-  /// 可选：模型 providerID（如 `anthropic`）
-  final String providerID;
-
-  /// 可选：模型 ID（如 `claude-sonnet-4-5`）
-  final String modelID;
-
-  /// 缓存的 opencode session id
-  ///
-  /// 同一会话里 opencode 会保留上下文，所以"助手联系人"应复用同一个 session。
-  /// 留空时由服务按"选 text-capable → 建新 session"顺序自动选一个。
-  final String sessionId;
-
-  /// 拼出 `http(s)://host:port[/basePath]`
-  String get httpBase {
-    final path = basePath.startsWith('/') ? basePath : '/$basePath';
-    final scheme = useHttps ? 'https' : 'http';
-    return '$scheme://$host:$port$path';
-  }
-
-  factory OpencodeConnectionConfig.fromJson(Map<String, dynamic> json) {
-    return OpencodeConnectionConfig(
-      type: json['type'] == 'ssh'
-          ? ConnectionType.ssh
-          : ConnectionType.http,
-      host: (json['host'] ?? '127.0.0.1').toString(),
-      port: (json['port'] as num?)?.toInt() ?? 4096,
-      useHttps: json['useHttps'] == true,
-      basePath: (json['basePath'] ?? '').toString(),
-      sshUser: (json['sshUser'] ?? '').toString(),
-      sshPassword: (json['sshPassword'] ?? '').toString(),
-      sshKeyPath: (json['sshKeyPath'] ?? '').toString(),
-      opencodePath: (json['opencodePath'] ?? 'opencode').toString(),
-      workingDirectory: (json['workingDirectory'] ?? '').toString(),
-      timeoutSeconds: (json['timeoutSeconds'] as num?)?.toInt() ?? 300,
-      username: (json['username'] ?? 'opencode').toString(),
-      password: (json['password'] ?? '').toString(),
-      agent: (json['agent'] ?? 'build').toString(),
-      providerID: (json['providerID'] ?? '').toString(),
-      modelID: (json['modelID'] ?? '').toString(),
-      sessionId: (json['sessionId'] ?? '').toString(),
-    );
-  }
-
-  Map<String, dynamic> toJson() => {
-    'type': type == ConnectionType.ssh ? 'ssh' : 'http',
-    'host': host,
-    'port': port,
-    'useHttps': useHttps,
-    'basePath': basePath,
-    'sshUser': sshUser,
-    'sshPassword': sshPassword,
-    'sshKeyPath': sshKeyPath,
-    'opencodePath': opencodePath,
-    'workingDirectory': workingDirectory,
-    'timeoutSeconds': timeoutSeconds,
-    'username': username,
-    'password': password,
-    'agent': agent,
-    'providerID': providerID,
-    'modelID': modelID,
-    'sessionId': sessionId,
-  };
-
-  /// 复制当前配置，覆写 sessionId
-  OpencodeConnectionConfig copyWith({String? sessionId}) {
-    return OpencodeConnectionConfig(
-      type: type,
-      host: host,
-      port: port,
-      useHttps: useHttps,
-      basePath: basePath,
-      sshUser: sshUser,
-      sshPassword: sshPassword,
-      sshKeyPath: sshKeyPath,
-      opencodePath: opencodePath,
-      workingDirectory: workingDirectory,
-      timeoutSeconds: timeoutSeconds,
-      username: username,
-      password: password,
-      agent: agent,
-      providerID: providerID,
-      modelID: modelID,
-      sessionId: sessionId ?? this.sessionId,
-    );
-  }
-}
+import '../../core/data/models/opencode_connection_config.dart';
 
 /// opencode CLI 交互服务
 ///
@@ -371,7 +222,8 @@ class OpencodeService {
           if (model is Map) {
             final pid = model['providerID']?.toString() ?? '';
             final mid = model['id']?.toString() ?? '';
-            if (pid.isNotEmpty && mid.isNotEmpty &&
+            if (pid.isNotEmpty &&
+                mid.isNotEmpty &&
                 !_isTextCapable(providers, pid, mid)) {
               continue; // 这个 session 用了 TTS/audio 模型，跳过
             }

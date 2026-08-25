@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'app.dart';
+import 'bootstrap.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -24,5 +24,5 @@ void main() async {
     DeviceOrientation.landscapeRight,
   ]);
 
-  runApp(const ChatApp());
+  runApp(const BootstrapApp());
 }

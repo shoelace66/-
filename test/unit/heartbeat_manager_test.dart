@@ -25,7 +25,8 @@ void main() {
       manager.markReconnecting();
 
       expect(manager.status, ConnectionStatus.reconnecting);
-      expect(statuses, [ConnectionStatus.connected, ConnectionStatus.reconnecting]);
+      expect(statuses,
+          [ConnectionStatus.connected, ConnectionStatus.reconnecting]);
     });
 
     test('stop 后不再回调', () {
@@ -43,7 +44,8 @@ void main() {
       manager.markReconnecting();
 
       // 第二次 start 会立即回调 connected，然后 markReconnecting 回调 reconnecting
-      expect(statuses2, [ConnectionStatus.connected, ConnectionStatus.reconnecting]);
+      expect(statuses2,
+          [ConnectionStatus.connected, ConnectionStatus.reconnecting]);
     });
   });
 }

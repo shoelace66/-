@@ -12,4 +12,5 @@ class AppStrings {
   static const String chatSettingsKey = 'chat_settings_v1';
   static const String appSettingsKey = 'app_settings_v1';
   static const String opencodeConnectionKey = 'opencode_connection_v1';
+  static const String providerSettingsKey = 'provider_settings_v1';
 }

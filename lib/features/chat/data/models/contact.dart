@@ -1,4 +1,41 @@
+import '../../../worldbook/domain/entities/world_book.dart';
+
 enum ContactCategory { story, contact, assistant }
+
+class VoiceOption {
+  const VoiceOption(
+      {required this.id, required this.label, required this.locale});
+
+  final String id;
+  final String label;
+  final String locale;
+
+  static const List<VoiceOption> presets = <VoiceOption>[
+    VoiceOption(id: 'zh-CN-XiaoxiaoNeural', label: '晓晓（女·温柔）', locale: 'zh-CN'),
+    VoiceOption(id: 'zh-CN-YunxiNeural', label: '云希（男·阳光）', locale: 'zh-CN'),
+    VoiceOption(id: 'zh-CN-YunyangNeural', label: '云扬（男·专业）', locale: 'zh-CN'),
+    VoiceOption(id: 'zh-CN-XiaoyiNeural', label: '晓伊（女·活泼）', locale: 'zh-CN'),
+    VoiceOption(id: 'zh-CN-YunjianNeural', label: '云健（男·激昂）', locale: 'zh-CN'),
+    VoiceOption(
+        id: 'zh-CN-liaoning-XiaobeiNeural', label: '晓北（女·东北）', locale: 'zh-CN'),
+    VoiceOption(
+        id: 'zh-CN-shaanxi-XiaoniNeural', label: '晓妮（女·陕西）', locale: 'zh-CN'),
+    VoiceOption(id: 'en-US-JennyNeural', label: 'Jenny（英文·女）', locale: 'en-US'),
+    VoiceOption(id: 'en-US-GuyNeural', label: 'Guy（英文·男）', locale: 'en-US'),
+    VoiceOption(
+        id: 'ja-JP-NanamiNeural', label: 'Nanami（日语·女）', locale: 'ja-JP'),
+  ];
+
+  static VoiceOption? findById(String? id) {
+    if (id == null || id.isEmpty) return null;
+    for (final v in presets) {
+      if (v.id == id) return v;
+    }
+    return null;
+  }
+
+  static VoiceOption get fallback => presets.first;
+}
 
 class LruReadyBucket {
   const LruReadyBucket._({
@@ -253,6 +290,8 @@ class EventNode {
     required this.event,
     required this.createdAtMs,
     this.summarized = false,
+    this.invalidated = false,
+    this.needsReview = false,
   });
 
   final String id;
@@ -260,6 +299,8 @@ class EventNode {
   final EventMemory event;
   final int createdAtMs;
   final bool summarized;
+  final bool invalidated;
+  final bool needsReview;
 
   factory EventNode.fromJson(Map<String, dynamic> json) {
     final tierText = (json['tier'] ?? '').toString();
@@ -271,6 +312,8 @@ class EventNode {
           ? (json['createdAtMs'] as num).toInt()
           : 0,
       summarized: json['summarized'] == true,
+      invalidated: json['invalidated'] == true,
+      needsReview: json['needsReview'] == true,
     );
   }
 
@@ -281,6 +324,8 @@ class EventNode {
       'event': event.toJson(),
       'createdAtMs': createdAtMs,
       'summarized': summarized,
+      if (invalidated) 'invalidated': true,
+      if (needsReview) 'needsReview': true,
     };
   }
 }
@@ -451,6 +496,8 @@ class EventGraphMemory {
                 ),
                 createdAtMs: n.createdAtMs,
                 summarized: n.summarized,
+                invalidated: n.invalidated,
+                needsReview: n.needsReview,
               ))
           .toList(),
       longTermQueue: longTermQueue
@@ -465,6 +512,8 @@ class EventGraphMemory {
                 ),
                 createdAtMs: n.createdAtMs,
                 summarized: n.summarized,
+                invalidated: n.invalidated,
+                needsReview: n.needsReview,
               ))
           .toList(),
       ultraLongTermQueue: ultraLongTermQueue
@@ -479,6 +528,8 @@ class EventGraphMemory {
                 ),
                 createdAtMs: n.createdAtMs,
                 summarized: n.summarized,
+                invalidated: n.invalidated,
+                needsReview: n.needsReview,
               ))
           .toList(),
       knowledgeNodes: knowledgeNodes
@@ -506,139 +557,6 @@ class EventGraphMemory {
       turnCount: turnCount,
     );
   }
-
-  List<EventMemory> relatedEventsForPrompt(
-    List<String> inputKeywords, {
-    int maxResults = 5,
-    // 邻居 BFS 深度：1 = 仅直连节点；2 = 一度+二度；默认 2。
-    // 调高可拉到更远关联但 prompt 噪音也变大。
-    int depth = 2,
-  }) {
-    if (inputKeywords.isEmpty) return const <EventMemory>[];
-    final inputKeywordSet = inputKeywords.map((e) => e.toLowerCase()).toSet();
-    final effectiveDepth = depth < 1 ? 1 : depth;
-
-    final allNodes = <EventNode>[
-      ...shortTermQueue,
-      ...longTermQueue,
-      ...ultraLongTermQueue,
-    ];
-    if (allNodes.isEmpty) return const <EventMemory>[];
-
-    final scored = <_ScoredNode>[];
-    for (final node in allNodes) {
-      // 关键词交集匹配：用户 keywords 与事件 keywords + theme 的交集数
-      final eventKeywords = node.event.keywords.map((e) => e.toLowerCase()).toSet();
-      final eventTheme = node.event.theme.map((e) => e.toLowerCase()).toSet();
-      final eventAll = <String>{...eventKeywords, ...eventTheme};
-      final hitCount = inputKeywordSet.intersection(eventAll).length;
-      if (hitCount > 0) {
-        scored.add(_ScoredNode(node: node, score: hitCount.toDouble()));
-      }
-    }
-    scored.sort((a, b) {
-      if (a.score != b.score) return b.score.compareTo(a.score);
-      return b.node.createdAtMs.compareTo(a.node.createdAtMs);
-    });
-
-    final idToNode = <String, EventNode>{for (final n in allNodes) n.id: n};
-    final adjacent = <String, Set<String>>{};
-    for (final edge in edges.values) {
-      adjacent
-          .putIfAbsent(edge.fromNodeId, () => <String>{})
-          .add(edge.toNodeId);
-      adjacent
-          .putIfAbsent(edge.toNodeId, () => <String>{})
-          .add(edge.fromNodeId);
-    }
-
-    final result = <EventMemory>[];
-    final seen = <String>{};
-
-    // 按 score 顺序遍历每个命中事件，限制只走 effectiveDepth 层邻居
-    for (final hit in scored) {
-      if (result.length >= maxResults) break;
-      if (seen.add(hit.node.id)) result.add(hit.node.event);
-
-      // BFS 队列：(nodeId, currentDepth)
-      final queue = <List<String>>[
-        for (final id in adjacent[hit.node.id] ?? const <String>{}) [id, '1'],
-      ];
-      while (queue.isNotEmpty && result.length < maxResults) {
-        final entry = queue.removeAt(0);
-        final id = entry[0];
-        final d = int.tryParse(entry[1]) ?? 1;
-        if (!seen.add(id)) continue;
-        final node = idToNode[id];
-        if (node == null) continue;
-        result.add(node.event);
-        if (d < effectiveDepth) {
-          for (final next in adjacent[id] ?? const <String>{}) {
-            queue.add([next, '${d + 1}']);
-          }
-        }
-      }
-    }
-
-    if (result.length >= maxResults) return result.take(maxResults).toList();
-
-    // 搜索物品队列：物品名与输入关键词做交集
-    final scoredBelongings = <_ScoredBelonging>[];
-    for (final key in belongingEventQueues.keys) {
-      final keyLower = key.toLowerCase();
-      if (inputKeywordSet.any((kw) => keyLower.contains(kw) || kw.contains(keyLower))) {
-        scoredBelongings.add(_ScoredBelonging(name: key, score: 1));
-      }
-    }
-    for (final b in scoredBelongings) {
-      final queue = belongingEventQueues[b.name] ?? const <String>[];
-      for (final eventId in queue.reversed) {
-        if (result.length >= maxResults) break;
-        final node = idToNode[eventId];
-        if (node == null) continue;
-        if (seen.add(node.id)) result.add(node.event);
-      }
-    }
-
-    // 搜索设定队列：设定名与输入关键词做交集
-    final scoredSettings = <_ScoredSetting>[];
-    for (final key in settingEventQueues.keys) {
-      final keyLower = key.toLowerCase();
-      if (inputKeywordSet.any((kw) => keyLower.contains(kw) || kw.contains(keyLower))) {
-        scoredSettings.add(_ScoredSetting(key: key, score: 1));
-      }
-    }
-    for (final s in scoredSettings) {
-      final queue = settingEventQueues[s.key] ?? const <String>[];
-      for (final eventId in queue.reversed) {
-        if (result.length >= maxResults) break;
-        final node = idToNode[eventId];
-        if (node == null) continue;
-        if (seen.add(node.id)) result.add(node.event);
-      }
-    }
-
-    return result.take(maxResults).toList();
-  }
-
-}
-
-class _ScoredNode {
-  const _ScoredNode({required this.node, required this.score});
-  final EventNode node;
-  final double score;
-}
-
-class _ScoredBelonging {
-  const _ScoredBelonging({required this.name, required this.score});
-  final String name;
-  final double score;
-}
-
-class _ScoredSetting {
-  const _ScoredSetting({required this.key, required this.score});
-  final String key;
-  final double score;
 }
 
 class Contact {
@@ -667,6 +585,8 @@ class Contact {
     this.status = const <String>[],
     this.mood = '',
     this.time = '',
+    this.voice = '',
+    this.worldBook = const WorldBook(),
     required this.createdAt,
   });
 
@@ -694,7 +614,45 @@ class Contact {
   final List<String> status;
   final String mood;
   final String time;
+  final String voice;
+  final WorldBook worldBook;
   final DateTime createdAt;
+
+  Contact copyWith({
+    EventLruBucket? events,
+    EventGraphMemory? eventGraph,
+    WorldBook? worldBook,
+  }) {
+    return Contact(
+      id: id,
+      name: name,
+      avatar: avatar,
+      category: category,
+      fixedInput: fixedInput,
+      currentStates: currentStates,
+      personality: personality,
+      appearance: appearance,
+      personalInfo: personalInfo,
+      settings: settings,
+      backgroundStory: backgroundStory,
+      narrativeRules: narrativeRules,
+      otherCharacteristics: otherCharacteristics,
+      worldKnowledge: worldKnowledge,
+      selfKnowledge: selfKnowledge,
+      userKnowledge: userKnowledge,
+      keywordLibrary: keywordLibrary,
+      themeLibrary: themeLibrary,
+      events: events ?? this.events,
+      eventGraph: eventGraph ?? this.eventGraph,
+      belongings: belongings,
+      status: status,
+      mood: mood,
+      time: time,
+      voice: voice,
+      worldBook: worldBook ?? this.worldBook,
+      createdAt: createdAt,
+    );
+  }
 
   factory Contact.fromJson(Map<String, dynamic> json) {
     final categoryText = (json['category'] ?? '').toString();
@@ -729,6 +687,12 @@ class Contact {
       status: _readStringList(json['status']),
       mood: (json['mood'] ?? '').toString(),
       time: (json['time'] ?? '').toString(),
+      voice: (json['voice'] ?? '').toString(),
+      worldBook: WorldBook.fromJson(
+        json['worldBook'] is Map
+            ? Map<String, dynamic>.from(json['worldBook'] as Map)
+            : null,
+      ),
       createdAt: DateTime.tryParse(createdAtIso) ??
           DateTime.fromMillisecondsSinceEpoch(createdAtMs),
     );
@@ -753,20 +717,23 @@ class Contact {
     if (settings.isNotEmpty) json['settings'] = settings;
     if (backgroundStory.isNotEmpty) json['backgroundStory'] = backgroundStory;
     if (narrativeRules.isNotEmpty) json['narrativeRules'] = narrativeRules;
-    if (otherCharacteristics.isNotEmpty)
+    if (otherCharacteristics.isNotEmpty) {
       json['otherCharacteristics'] = otherCharacteristics;
-    if (worldKnowledge.items.isNotEmpty)
+    }
+    if (worldKnowledge.items.isNotEmpty) {
       json['worldKnowledge'] = worldKnowledge.items;
-    if (selfKnowledge.items.isNotEmpty)
+    }
+    if (selfKnowledge.items.isNotEmpty) {
       json['selfKnowledge'] = selfKnowledge.items;
-    if (userKnowledge.items.isNotEmpty)
+    }
+    if (userKnowledge.items.isNotEmpty) {
       json['userKnowledge'] = userKnowledge.items;
-    if (keywordLibrary.isNotEmpty)
-      json['keywordLibrary'] = keywordLibrary;
-    if (themeLibrary.isNotEmpty)
-      json['themeLibrary'] = themeLibrary;
-    if (events.items.isNotEmpty)
+    }
+    if (keywordLibrary.isNotEmpty) json['keywordLibrary'] = keywordLibrary;
+    if (themeLibrary.isNotEmpty) json['themeLibrary'] = themeLibrary;
+    if (events.items.isNotEmpty) {
       json['events'] = events.items.map((e) => e.toJson()).toList();
+    }
     if (eventGraph.shortTermQueue.isNotEmpty ||
         eventGraph.longTermQueue.isNotEmpty ||
         eventGraph.ultraLongTermQueue.isNotEmpty ||
@@ -781,6 +748,8 @@ class Contact {
     if (status.isNotEmpty) json['status'] = status;
     if (mood.isNotEmpty) json['mood'] = mood;
     if (time.isNotEmpty) json['time'] = time;
+    if (voice.isNotEmpty) json['voice'] = voice;
+    if (!worldBook.isEmpty) json['worldBook'] = worldBook.toJson();
 
     return json;
   }
@@ -824,6 +793,7 @@ class Contact {
       status: List<String>.from(status),
       mood: mood,
       time: time,
+      voice: voice,
       createdAt: createdAt,
     );
   }

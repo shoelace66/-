@@ -1,0 +1,57 @@
+{
+  "contacts": [
+    {
+      "id": "fixture-role",
+      "name": "脱敏测试角色",
+      "category": "contact",
+      "createdAt": "1970-01-01T00:00:00.001",
+      "createdAtMs": 1,
+      "worldKnowledge": ["这是一条不含真实用户信息的固定迁移样本"],
+      "eventGraph": {
+        "shortTermQueue": [
+          {
+            "id": "fixture-event",
+            "tier": "short",
+            "event": {
+              "description": "角色在雨夜车站收到一把花伞",
+              "keywords": ["雨夜车站", "花伞"],
+              "theme": ["重逢"]
+            },
+            "createdAtMs": 2,
+            "summarized": false
+          }
+        ],
+        "longTermQueue": [],
+        "ultraLongTermQueue": [],
+        "knowledgeNodes": [],
+        "belongingEventQueues": {
+          "花伞": ["fixture-event"]
+        },
+        "settingEventQueues": {
+          "雨夜车站": ["fixture-event"]
+        },
+        "turnCount": 1
+      }
+    }
+  ],
+  "messagesByContact": {
+    "fixture-role": [
+      {
+        "id": "fixture-message-user",
+        "role": "user",
+        "content": "把伞递给她。",
+        "createdAt": "1970-01-01T00:00:00.002",
+        "createdAtMs": 2,
+        "status": "sent"
+      },
+      {
+        "id": "fixture-message-assistant",
+        "role": "assistant",
+        "content": "她接过花伞，轻声道谢。",
+        "createdAt": "1970-01-01T00:00:00.003",
+        "createdAtMs": 3,
+        "status": "sent"
+      }
+    ]
+  }
+}

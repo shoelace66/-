@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 
-import 'features/chat/presentation/pages/chat_page.dart';
+import 'app_router.dart';
+import 'features/chat/domain/providers/chat_provider.dart';
 
 class ChatApp extends StatelessWidget {
-  const ChatApp({super.key});
+  const ChatApp({super.key, required this.chatProvider});
+
+  final ChatProvider chatProvider;
 
   @override
   Widget build(BuildContext context) {
@@ -73,7 +76,8 @@ class ChatApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const ChatPage(),
+      initialRoute: AppRoutes.chat,
+      onGenerateRoute: AppRouter(chatProvider).onGenerateRoute,
     );
   }
 }

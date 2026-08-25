@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../data/models/opencode_connection_config.dart';
 import '../../../features/chat/domain/providers/chat_provider.dart';
-import '../../../infrastructure/services/opencode_service.dart';
 
 class AssistantConfigPage extends StatefulWidget {
   const AssistantConfigPage({super.key, required this.provider});
@@ -50,7 +50,8 @@ class _AssistantConfigPageState extends State<AssistantConfigPage> {
     _sshKeyPathCtrl = TextEditingController(text: config.sshKeyPath);
     _opencodePathCtrl = TextEditingController(text: config.opencodePath);
     _workingDirCtrl = TextEditingController(text: config.workingDirectory);
-    _timeoutCtrl = TextEditingController(text: config.timeoutSeconds.toString());
+    _timeoutCtrl =
+        TextEditingController(text: config.timeoutSeconds.toString());
     _useHttps = config.useHttps;
   }
 
@@ -103,12 +104,11 @@ class _AssistantConfigPageState extends State<AssistantConfigPage> {
     });
 
     final config = _buildConfig();
-    final service = OpencodeService(config: config);
-    final result = await service.testConnection();
+    final error = await widget.provider.testOpencodeConnection(config);
 
     setState(() {
       _testing = false;
-      _testResult = result.success ? '连接成功！' : '连接失败：${result.error}';
+      _testResult = error == null ? '连接成功！' : '连接失败：$error';
     });
   }
 

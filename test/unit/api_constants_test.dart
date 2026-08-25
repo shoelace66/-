@@ -51,8 +51,8 @@ void main() {
       expect(ApiConstants.runtimeModel, 'deepseek-chat');
     });
 
-    test('requestTimeoutSeconds 为 60', () {
-      expect(ApiConstants.requestTimeoutSeconds, 60);
+    test('runtimeTimeoutSeconds 默认值', () {
+      expect(ApiConstants.runtimeTimeoutSeconds, 60);
     });
   });
 }

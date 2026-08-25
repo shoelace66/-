@@ -1,12 +1,16 @@
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:convert';
 
-import '../../constants/app_strings.dart';
 import '../../data/models/app_settings.dart';
 
 class AppSettingsPage extends StatefulWidget {
-  const AppSettingsPage({super.key});
+  const AppSettingsPage({
+    super.key,
+    required this.initial,
+    required this.onSave,
+  });
+
+  final AppSettings initial;
+  final Future<void> Function(AppSettings settings) onSave;
 
   static const String routeName = '/app-settings';
 
@@ -15,42 +19,16 @@ class AppSettingsPage extends StatefulWidget {
 }
 
 class _AppSettingsPageState extends State<AppSettingsPage> {
-  static const String _settingsKey = AppStrings.appSettingsKey;
-
-  AppSettings _settings = const AppSettings();
-  bool _isLoading = true;
+  late AppSettings _settings;
 
   @override
   void initState() {
     super.initState();
-    _loadSettings();
-  }
-
-  Future<void> _loadSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_settingsKey);
-    if (raw != null && raw.isNotEmpty) {
-      try {
-        final decoded = jsonDecode(raw);
-        if (decoded is Map) {
-          setState(() {
-            _settings = AppSettings.fromJson(
-              decoded.map((k, v) => MapEntry(k.toString(), v)),
-            );
-            _isLoading = false;
-          });
-          return;
-        }
-      } catch (_) {}
-    }
-    setState(() {
-      _isLoading = false;
-    });
+    _settings = widget.initial;
   }
 
   Future<void> _saveSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_settingsKey, jsonEncode(_settings.toJson()));
+    await widget.onSave(_settings);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('设置已保存')),
@@ -83,20 +61,35 @@ class _AppSettingsPageState extends State<AppSettingsPage> {
       title: Text(title),
       subtitle: Text(subtitle),
       trailing: SizedBox(
-        width: 120,
+        width: 136,
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             IconButton(
               icon: const Icon(Icons.remove),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints.tightFor(
+                width: 40,
+                height: 40,
+              ),
               onPressed: value > min ? () => onChanged(value - 1) : null,
             ),
-            Text(
-              value.toString(),
-              style: Theme.of(context).textTheme.titleMedium,
+            Expanded(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  value.toString(),
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
             ),
             IconButton(
               icon: const Icon(Icons.add),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints.tightFor(
+                width: 40,
+                height: 40,
+              ),
               onPressed: value < max ? () => onChanged(value + 1) : null,
             ),
           ],
@@ -107,12 +100,6 @@ class _AppSettingsPageState extends State<AppSettingsPage> {
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
-    }
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('应用设置'),
@@ -149,7 +136,8 @@ class _AppSettingsPageState extends State<AppSettingsPage> {
                     ),
                     _buildNumberSetting(
                       title: '长期事件数量',
-                      subtitle: '输入到 LLM 的长期事件数量（默认: 1，只取最新 summary；老 summary 通过 2→3 cascade 进超长期不会丢）',
+                      subtitle:
+                          '输入到 LLM 的长期事件数量（默认: 1，只取最新 summary；老 summary 通过 2→3 cascade 进超长期不会丢）',
                       value: _settings.maxLongTermEvents,
                       min: 1,
                       max: 30,
@@ -242,12 +230,14 @@ class _AppSettingsPageState extends State<AppSettingsPage> {
                     ),
                     _buildNumberSetting(
                       title: '超长期阈值（长期→超长期）',
-                      subtitle: '长期事件数 ≥ 此值时让 LLM 再压到超长期（默认: 5；调到 999 即可禁用超长期级联）',
+                      subtitle:
+                          '长期事件数 ≥ 此值时让 LLM 再压到超长期（默认: 5；调到 999 即可禁用超长期级联）',
                       value: _settings.ultraSummaryThreshold,
                       min: 2,
                       max: 100,
                       onChanged: (v) => setState(() {
-                        _settings = _settings.copyWith(ultraSummaryThreshold: v);
+                        _settings =
+                            _settings.copyWith(ultraSummaryThreshold: v);
                       }),
                     ),
                     _buildSectionTitle('关联检索'),
@@ -268,7 +258,8 @@ class _AppSettingsPageState extends State<AppSettingsPage> {
                       min: 0,
                       max: 100,
                       onChanged: (v) => setState(() {
-                        _settings = _settings.copyWith(vectorSimilarityWeight: v);
+                        _settings =
+                            _settings.copyWith(vectorSimilarityWeight: v);
                       }),
                     ),
                     _buildSectionTitle('LRU 权重设置'),
@@ -345,8 +336,7 @@ class _AppSettingsPageState extends State<AppSettingsPage> {
                       min: 50,
                       max: 1000,
                       onChanged: (v) => setState(() {
-                        _settings =
-                            _settings.copyWith(keywordLibrarySize: v);
+                        _settings = _settings.copyWith(keywordLibrarySize: v);
                       }),
                     ),
                     const SizedBox(height: 32),

@@ -1,0 +1,35 @@
+{
+  "format": "ai-roleplay-chat-backup",
+  "version": 1,
+  "exportedAt": "2026-07-29T00:00:00.000Z",
+  "contacts": [
+    {
+      "id": "fixture-role",
+      "name": "脱敏测试角色",
+      "category": "contact",
+      "createdAt": "1970-01-01T00:00:00.001",
+      "createdAtMs": 1,
+      "eventGraph": {
+        "shortTermQueue": [],
+        "longTermQueue": [],
+        "ultraLongTermQueue": [],
+        "knowledgeNodes": [],
+        "belongingEventQueues": {},
+        "settingEventQueues": {},
+        "turnCount": 0
+      }
+    }
+  ],
+  "messagesByContact": {
+    "fixture-role": [
+      {
+        "id": "fixture-message",
+        "role": "user",
+        "content": "固定脱敏备份样本",
+        "createdAt": "1970-01-01T00:00:00.002",
+        "createdAtMs": 2,
+        "status": "sent"
+      }
+    ]
+  }
+}

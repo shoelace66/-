@@ -1,42 +1,66 @@
 import 'dart:async';
-import 'package:flutter/services.dart';
 
 import 'package:flutter/material.dart';
 
-import '../../../../core/presentation/pages/app_settings_page.dart';
-import '../../../../core/presentation/pages/assistant_config_page.dart';
+import '../../../../app_router.dart';
+import '../../../../core/data/models/provider_settings.dart';
+import '../../application/chat_media_controller.dart';
+import '../../application/chat_view_state.dart';
 import '../../data/models/contact.dart';
 import '../../data/models/message.dart';
 import '../../domain/providers/chat_provider.dart';
 import '../widgets/contact_sidebar.dart';
 import '../widgets/contact_editor_dialog.dart';
+import '../widgets/chat_actions.dart';
+import '../widgets/chat_message_list.dart';
+import '../widgets/chat_shell.dart';
+import '../widgets/chat_status_views.dart';
+import '../widgets/message_composer.dart';
 
 class ChatPage extends StatefulWidget {
-  const ChatPage({super.key});
+  const ChatPage({
+    super.key,
+    required this.provider,
+    this.mediaController,
+  });
+
+  final ChatProvider provider;
+  final ChatMediaController? mediaController;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
 }
 
 class _ChatPageState extends State<ChatPage> {
-  final ChatProvider _provider = ChatProvider();
+  late final ChatProvider _provider;
+  late final ChatMediaController _mediaController;
+  late final bool _ownsMediaController;
   final TextEditingController _inputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
 
   @override
   void initState() {
     super.initState();
+    _provider = widget.provider;
+    _ownsMediaController = widget.mediaController == null;
+    _mediaController =
+        widget.mediaController ?? ChatMediaController(provider: _provider);
     _provider.addListener(_scrollToBottom);
-    unawaited(_provider.initialize());
+    _mediaController.addListener(_onMediaChanged);
   }
 
   @override
   void dispose() {
+    _mediaController.removeListener(_onMediaChanged);
+    if (_ownsMediaController) _mediaController.dispose();
     _provider.removeListener(_scrollToBottom);
-    _provider.dispose();
     _inputController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  void _onMediaChanged() {
+    if (mounted) setState(() {});
   }
 
   void _scrollToBottom() {
@@ -58,95 +82,249 @@ class _ChatPageState extends State<ChatPage> {
     await _provider.sendMessage(input);
   }
 
+  /// 打开 API 提供商设置页（LLM / 生图 / TTS）
   Future<void> _openApiSettingDialog() async {
-    final keyCtrl = TextEditingController(text: _provider.currentApiKey);
-    final baseUrlCtrl = TextEditingController(text: _provider.currentApiBaseUrl);
-    final modelCtrl = TextEditingController(text: _provider.currentApiModel);
-    final promptCtrl = TextEditingController(
-      text: _provider.currentSystemPrompt,
+    final saved = await Navigator.of(context).pushNamed<ProviderSettings>(
+      AppRoutes.providerSettings,
     );
+    if (saved == null) return;
+    await _provider.saveProviderSettings(saved);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('API 提供商配置已保存')),
+    );
+  }
 
-    final result = await showDialog<ApiConfigDraft>(
+  /// 旧版"系统提示词"独立编辑入口（保留做兜底）
+  Future<void> _openSystemPromptDialog() async {
+    final ctrl = TextEditingController(text: _provider.currentSystemPrompt);
+    final result = await showDialog<String>(
       context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('API 配置'),
-          content: SizedBox(
-            width: 460,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: keyCtrl,
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'API Key',
-                    hintText: '请输入 API Key',
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: baseUrlCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'Base URL',
-                    hintText: 'https://api.deepseek.com',
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: modelCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'Model',
-                    hintText: 'deepseek-chat',
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: promptCtrl,
-                  minLines: 2,
-                  maxLines: 6,
-                  decoration: const InputDecoration(
-                    labelText: '系统提示词',
-                    hintText: '可选：定义全局系统提示词',
-                  ),
-                ),
-              ],
+      builder: (context) => AlertDialog(
+        title: const Text('系统提示词'),
+        content: SizedBox(
+          width: 460,
+          child: TextField(
+            controller: ctrl,
+            minLines: 2,
+            maxLines: 8,
+            decoration: const InputDecoration(
+              border: OutlineInputBorder(),
+              hintText: '可选：定义全局系统提示词',
             ),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () {
-                Navigator.of(context).pop(
-                  ApiConfigDraft(
-                    apiKey: keyCtrl.text,
-                    baseUrl: baseUrlCtrl.text,
-                    model: modelCtrl.text,
-                    systemPrompt: promptCtrl.text,
-                  ),
-                );
-              },
-              child: const Text('保存'),
-            ),
-          ],
-        );
-      },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(ctrl.text),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
     );
-
     if (result == null) return;
-    await _provider.saveApiConfig(
-      apiKey: result.apiKey,
-      baseUrl: result.baseUrl,
-      model: result.model,
-    );
-    await _provider.saveSystemPrompt(result.systemPrompt);
+    await _provider.saveSystemPrompt(result);
     if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('API 配置已保存')));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('系统提示词已保存')),
+    );
+  }
+
+  void _openMemoryArchive() {
+    if (_provider.selectedContact == null) return;
+    Navigator.of(context).pushNamed(AppRoutes.memoryArchive);
+  }
+
+  void _openBackupRestore() {
+    Navigator.of(context).pushNamed(AppRoutes.backup);
+  }
+
+  void _openWorldBook() {
+    if (_provider.selectedContact == null) return;
+    Navigator.of(context).pushNamed(AppRoutes.worldBook);
+  }
+
+  void _openConversationTimeline() {
+    if (_provider.selectedContact == null) return;
+    Navigator.of(context).pushNamed(AppRoutes.timeline);
+  }
+
+  Future<void> _editAndRegenerateLastTurn() async {
+    final original = _provider.lastTurnUserInput;
+    if (original == null) return;
+    final controller = TextEditingController(text: original);
+    final edited = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('修改上一轮并重新生成'),
+        content: TextField(
+          controller: controller,
+          minLines: 3,
+          maxLines: 8,
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            helperText: '旧回复及其记忆会先完整撤回，再用修改后的内容生成。',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('重新生成'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (edited == null || edited.isEmpty) return;
+    final ok = await _provider.regenerateLastTurn(editedInput: edited);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(ok ? '已重新生成上一轮' : '重新生成失败')),
+    );
+  }
+
+  Future<void> _createBranchFromMessage(Message message) async {
+    final checkpoint = _provider.conversationCheckpoints
+        .where((item) => item.sourceMessageId == message.id)
+        .firstOrNull;
+    if (checkpoint == null) return;
+    final controller = TextEditingController(text: '从此处改写');
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('创建剧情分支'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 40,
+          decoration: const InputDecoration(labelText: '分支名称'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('创建并切换'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.trim().isEmpty) return;
+    final ok = await _provider.createBranchFromCheckpoint(
+      checkpoint.id,
+      name: name,
+    );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(ok ? '已创建并切换到新分支' : '创建分支失败')),
+    );
+    if (ok) _scrollToBottom();
+  }
+
+  void _quoteMessage(Message message) {
+    final quoted =
+        message.content.split('\n').map((line) => '> $line').join('\n');
+    _inputController.text = '$quoted\n\n';
+    _inputController.selection = TextSelection.collapsed(
+      offset: _inputController.text.length,
+    );
+  }
+
+  Future<void> _editMessage(Message message) async {
+    final controller = TextEditingController(text: message.content);
+    final edited = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('编辑消息'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          minLines: 2,
+          maxLines: 10,
+          decoration: const InputDecoration(border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (edited == null || edited.isEmpty) return;
+    await _provider.editMessage(message.id, edited);
+  }
+
+  Future<void> _deleteMessage(Message message) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除消息'),
+        content: const Text('这条消息将从当前分支永久删除。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await _provider.deleteMessage(message.id);
+  }
+
+  Future<void> _generateCandidate(Message message) async {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      const SnackBar(content: Text('正在生成候选回复…')),
+    );
+    final ok = await _provider.generateReplyCandidate(message.id);
+    if (!mounted) return;
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(content: Text(ok ? '候选回复已生成' : '未能生成不同的候选回复')),
+    );
+  }
+
+  Future<void> _showCandidates(Message message) async {
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('选择候选回复'),
+        children: [
+          for (final candidate in message.alternatives)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, candidate),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(candidate),
+              ),
+            ),
+        ],
+      ),
+    );
+    if (selected != null) {
+      await _provider.applyReplyCandidate(message.id, selected);
+    }
   }
 
   Future<void> _openCreateContactDialog() async {
@@ -192,6 +370,7 @@ class _ChatPageState extends State<ChatPage> {
         fallbackFixedInput:
             result.fixedInput.isNotEmpty ? result.fixedInput : null,
         fallbackCurrentStates: result.currentStates,
+        fallbackVoice: result.voice,
       );
       if (!mounted) return;
 
@@ -219,6 +398,7 @@ class _ChatPageState extends State<ChatPage> {
         fallbackFixedInput:
             result.fixedInput.isNotEmpty ? result.fixedInput : null,
         fallbackCurrentStates: result.currentStates,
+        fallbackVoice: result.voice,
       );
       if (!mounted) return;
       if (!ok) {
@@ -237,6 +417,7 @@ class _ChatPageState extends State<ChatPage> {
         fixedInput: result.fixedInput,
         currentStates: result.currentStates,
         category: result.category,
+        voice: result.voice,
       );
       if (!mounted) return;
       if (!ok) {
@@ -251,123 +432,118 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
+  Future<void> _recallLastTurn() async {
+    if (!_provider.canRecall) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('确认撤回'),
+        content: const Text('确定要撤回最近一轮对话吗？这将恢复角色到对话前的记忆状态。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.orange),
+            child: const Text('撤回'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final ok = await _provider.recallLastTurn();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(ok ? '已撤回最近一轮对话' : '撤回失败')),
+    );
+  }
+
+  ChatActions _buildActions({required bool compact, required bool hasContact}) {
+    return ChatActions(
+      compact: compact,
+      hasContact: hasContact,
+      canRecall: _provider.canRecall,
+      debugMode: _provider.isDebugMode,
+      onCreateContact: _openCreateContactDialog,
+      onRecall: _recallLastTurn,
+      onProviders: _openApiSettingDialog,
+      onMemory: _openMemoryArchive,
+      onTimeline: _openConversationTimeline,
+      onSearch: () => Navigator.of(context).pushNamed(AppRoutes.search),
+      onWorldBook: _openWorldBook,
+      onImageGallery: () =>
+          Navigator.of(context).pushNamed(AppRoutes.imageGallery),
+      onBackup: _openBackupRestore,
+      onSystemPrompt: _openSystemPromptDialog,
+      onSettings: () => Navigator.of(context).pushNamed(AppRoutes.appSettings),
+      onAssistantSettings: () =>
+          Navigator.of(context).pushNamed(AppRoutes.assistantSettings),
+      onToggleDebug: _provider.toggleDebugMode,
+      profiles: _provider.llmProfiles,
+      activeProfile: _provider.providerSettings.llm,
+      onActivateProfile: _provider.activateLlmProfile,
+      onCheckProfiles: _checkLlmProfiles,
+    );
+  }
+
+  Future<void> _checkLlmProfiles() async {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      const SnackBar(content: Text('正在检查全部 LLM Profile…')),
+    );
+    final results = await _provider.checkLlmProfiles();
+    if (!mounted) return;
+    messenger.hideCurrentSnackBar();
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('LLM 健康检查'),
+        content: SizedBox(
+          width: 480,
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              for (final entry in results.entries)
+                ListTile(
+                  leading: Icon(
+                    entry.value == null ? Icons.check_circle : Icons.error,
+                    color: entry.value == null ? Colors.green : Colors.red,
+                  ),
+                  title: Text('${entry.key.presetId} / ${entry.key.model}'),
+                  subtitle: Text(entry.value ?? '连接正常'),
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: _provider,
       builder: (context, _) {
-        final selected = _provider.selectedContact;
-        final isCompact = MediaQuery.of(context).size.width < 900;
-
-        // 移动端使用独立Scaffold，桌面端使用嵌套布局
-        if (isCompact) {
-          return _buildMobileLayout(selected);
-        }
-
-        return Scaffold(
-          appBar: AppBar(
-            title: Text(
-              selected == null ? 'Chat Demo' : selected.name,
-            ),
-            actions: [
-              IconButton(
-                onPressed: _openCreateContactDialog,
-                tooltip: '创建对象',
-                icon: const Icon(Icons.person_add_alt_1),
-              ),
-              IconButton(
-                onPressed: _openApiSettingDialog,
-                tooltip: 'API 配置',
-                icon: const Icon(Icons.key_outlined),
-              ),
-              IconButton(
-                onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (context) => const AppSettingsPage(),
-                    ),
-                  );
-                },
-                tooltip: '应用设置',
-                icon: const Icon(Icons.settings_outlined),
-              ),
-              IconButton(
-                onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (context) => AssistantConfigPage(provider: _provider),
-                    ),
-                  );
-                },
-                tooltip: '助手连接配置',
-                icon: const Icon(Icons.terminal_outlined),
-              ),
-              IconButton(
-                onPressed: _provider.toggleDebugMode,
-                tooltip: '切换调试模式',
-                icon: Icon(
-                  _provider.isDebugMode
-                      ? Icons.bug_report
-                      : Icons.bug_report_outlined,
-                ),
-              ),
-              // 撤回按钮（调试用：总是显示）
-              IconButton(
-                onPressed: _provider.canRecall
-                    ? () async {
-                        final confirmed = await showDialog<bool>(
-                          context: context,
-                          builder: (context) => AlertDialog(
-                            title: const Text('确认撤回'),
-                            content:
-                                const Text('确定要撤回最近一轮对话吗？这将恢复角色到对话前的记忆状态。'),
-                            actions: [
-                              TextButton(
-                                onPressed: () =>
-                                    Navigator.of(context).pop(false),
-                                child: const Text('取消'),
-                              ),
-                              FilledButton(
-                                onPressed: () =>
-                                    Navigator.of(context).pop(true),
-                                style: FilledButton.styleFrom(
-                                    backgroundColor: Colors.orange),
-                                child: const Text('撤回'),
-                              ),
-                            ],
-                          ),
-                        );
-                        if (confirmed == true) {
-                          final ok = await _provider.recallLastTurn();
-                          if (!mounted) return;
-                          if (ok) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('已撤回最近一轮对话')),
-                            );
-                          } else {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('撤回失败')),
-                            );
-                          }
-                        }
-                      }
-                    : () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                                'canRecall=${_provider.canRecall}，快照为空，无法撤回'),
-                          ),
-                        );
-                      },
-                tooltip: '撤回最近一轮对话',
-                icon: Icon(
-                  Icons.undo,
-                  color: _provider.canRecall ? null : Colors.grey,
-                ),
-              ),
-            ],
+        final state = _provider.state;
+        final selected = state.selectedContact;
+        final compact = MediaQuery.of(context).size.width < 900;
+        return ChatShell(
+          compact: compact,
+          title: selected?.name ?? 'Chat Demo',
+          actions: _buildActions(
+            compact: compact,
+            hasContact: selected != null,
           ),
-          body: _buildDesktopLayout(selected),
+          contactPanel: _buildContactPanel(compact, state),
+          chatArea: _buildChatArea(state),
         );
       },
     );
@@ -410,761 +586,204 @@ class _ChatPageState extends State<ChatPage> {
   /// 处理联系人选择
   ///
   /// 选择联系人后滚动聊天栏到最底部
-  void _onSelectContact(String contactId) {
-    _provider.selectContact(contactId);
+  Future<void> _onSelectContact(String contactId) async {
+    await _provider.selectContact(contactId);
+    if (!mounted) return;
     // 延迟执行滚动，等待UI更新完成
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _scrollToBottom();
     });
   }
 
-  Widget _buildDesktopLayout(Contact? selected) {
-    return Row(
-      children: [
-        ContactSidebar(
-          contacts: _provider.contacts,
-          selectedContactId: _provider.selectedContactId,
-          onSelect: _onSelectContact,
-          onAdd: _openCreateContactDialog,
-          onDelete: _deleteContact,
-          showDeleteInList: true,
-          showDeleteInFooter: false,
+  Future<void> _loadOlderMessages() async {
+    if (!_scrollController.hasClients) {
+      await _provider.loadOlderMessages();
+      return;
+    }
+    final oldPixels = _scrollController.position.pixels;
+    final oldMaxExtent = _scrollController.position.maxScrollExtent;
+    final loaded = await _provider.loadOlderMessages();
+    if (!mounted || !loaded) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      final addedExtent =
+          _scrollController.position.maxScrollExtent - oldMaxExtent;
+      _scrollController.jumpTo(
+        (oldPixels + addedExtent).clamp(
+          _scrollController.position.minScrollExtent,
+          _scrollController.position.maxScrollExtent,
         ),
-        const VerticalDivider(width: 1),
-        Expanded(child: _buildChatArea(selected)),
-      ],
-    );
+      );
+    });
   }
 
-  Widget _buildMobileLayout(Contact? selected) {
-    return Scaffold(
-      extendBodyBehindAppBar: false,
-      appBar: AppBar(
-        title: Text(
-          selected == null ? 'Chat Demo' : selected.name,
-          overflow: TextOverflow.ellipsis,
+  /// 长按 AI 消息 → 生成图片
+  ///
+  /// 完整流程：
+  /// 1. 弹一个描述输入框（预填原文，可改写）
+  /// 2. 静默调用 LLM 润色：把"用户中文描述 + 联系人设定"扩写为
+  ///    结构化英文生图 prompt
+  /// 3. 弹一个「生图中…」SnackBar（不阻塞 UI）
+  /// 4. 调用生图服务
+  /// 5. 把结果作为新的图片消息插入到消息流末尾，
+  ///    同时保留 `originalPrompt`（用户原文）和 `imagePrompt`（润色后）
+  Future<void> _generateImageForMessage(Message source) async {
+    final userPrompt = await _promptForImageDescription(source.content);
+    if (userPrompt == null || !mounted) return;
+    final contactId = _provider.selectedContactId;
+    if (contactId == null) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      const SnackBar(content: Text('生图中…（正在根据角色设定润色描述）')),
+    );
+    final result = await _mediaController.generateImage(
+      contactId: contactId,
+      userPrompt: userPrompt,
+    );
+    if (!mounted) return;
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          result.isSuccess ? '图片已添加到会话' : '生图失败：${result.error}',
         ),
-        centerTitle: true,
-        leading: Builder(
-          builder: (context) => IconButton(
-            icon: const Icon(Icons.menu),
-            onPressed: () => Scaffold.of(context).openDrawer(),
-            tooltip: '打开对象列表',
-            padding: const EdgeInsets.all(12),
+      ),
+    );
+    if (result.isSuccess) _scrollToBottom();
+  }
+
+  Future<String?> _promptForImageDescription(String defaultText) async {
+    final ctrl = TextEditingController(text: defaultText);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('生成图片'),
+        content: SizedBox(
+          width: 420,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '用中文描述你想要的画面，提交后会自动根据当前角色设定翻译为英文 prompt。',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: ctrl,
+                minLines: 3,
+                maxLines: 6,
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  hintText: '描述你想生成的图片',
+                ),
+              ),
+            ],
           ),
         ),
         actions: [
-          // 移动端菜单按钮
-          PopupMenuButton<String>(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            icon: const Icon(Icons.more_vert),
-            tooltip: '更多选项',
-            onSelected: (value) async {
-              switch (value) {
-                case 'recall':
-                  if (_provider.canRecall) {
-                    final confirmed = await showDialog<bool>(
-                      context: context,
-                      builder: (context) => AlertDialog(
-                        title: const Text('确认撤回'),
-                        content: const Text('确定要撤回最近一轮对话吗？这将恢复角色到对话前的记忆状态。'),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.of(context).pop(false),
-                            child: const Text('取消'),
-                          ),
-                          FilledButton(
-                            onPressed: () => Navigator.of(context).pop(true),
-                            style: FilledButton.styleFrom(
-                                backgroundColor: Colors.orange),
-                            child: const Text('撤回'),
-                          ),
-                        ],
-                      ),
-                    );
-                    if (confirmed == true) {
-                      final ok = await _provider.recallLastTurn();
-                      if (!mounted) return;
-                      if (ok) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('已撤回最近一轮对话')),
-                        );
-                      } else {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('撤回失败')),
-                        );
-                      }
-                    }
-                  } else {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('没有可撤回的内容'),
-                      ),
-                    );
-                  }
-                  break;
-                case 'api':
-                  _openApiSettingDialog();
-                  break;
-                case 'settings':
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (context) => const AppSettingsPage(),
-                    ),
-                  );
-                  break;
-                case 'assistant':
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (context) => AssistantConfigPage(provider: _provider),
-                    ),
-                  );
-                  break;
-                case 'debug':
-                  _provider.toggleDebugMode();
-                  break;
-              }
-            },
-            itemBuilder: (context) => [
-              PopupMenuItem(
-                value: 'recall',
-                enabled: _provider.canRecall,
-                child: Row(
-                  children: [
-                    Icon(
-                      Icons.undo,
-                      color: _provider.canRecall ? null : Colors.grey,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      '撤回',
-                      style: TextStyle(
-                        color: _provider.canRecall ? null : Colors.grey,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'api',
-                child: Row(
-                  children: [
-                    Icon(Icons.key_outlined),
-                    SizedBox(width: 8),
-                    Text('API 配置'),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'settings',
-                child: Row(
-                  children: [
-                    Icon(Icons.settings_outlined),
-                    SizedBox(width: 8),
-                    Text('应用设置'),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'assistant',
-                child: Row(
-                  children: [
-                    Icon(Icons.terminal_outlined),
-                    SizedBox(width: 8),
-                    Text('助手连接配置'),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'debug',
-                child: Row(
-                  children: [
-                    Icon(
-                      _provider.isDebugMode
-                          ? Icons.bug_report
-                          : Icons.bug_report_outlined,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(_provider.isDebugMode ? '关闭调试' : '开启调试'),
-                  ],
-                ),
-              ),
-            ],
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(ctrl.text.trim()),
+            child: const Text('生成'),
           ),
         ],
-        elevation: 2,
-        scrolledUnderElevation: 4,
       ),
-      drawer: Drawer(
-        width: 280,
-        child: ContactSidebar(
-          contacts: _provider.contacts,
-          selectedContactId: _provider.selectedContactId,
-          onSelect: (id) {
-            _onSelectContact(id);
-            Navigator.of(context).pop(); // 选择后自动关闭侧边栏
-          },
-          onAdd: () {
-            Navigator.of(context).pop();
-            _openCreateContactDialog();
-          },
-          onDelete: (id) {
-            Navigator.of(context).pop();
-            _deleteContact(id);
-          },
-          showDeleteInList: false,
-          showDeleteInFooter: true,
-        ),
-      ),
-      body: _buildChatArea(selected),
-      resizeToAvoidBottomInset: true,
+    );
+    if (result == null || result.isEmpty) return null;
+    return result;
+  }
+
+  /// 朗读 AI 消息文本
+  ///
+  /// - 当前在播放同一条消息：忽略（实际通过 stop 按钮触发）
+  /// - 当前在播放其他消息：先停掉旧的，再播新的
+  /// - 没选联系人 / 文本为空：忽略
+  Future<void> _speakMessage(Message message) =>
+      _mediaController.speak(message);
+
+  Future<void> _stopSpeaking() => _mediaController.stopSpeaking();
+
+  Widget _buildContactPanel(bool compact, ChatViewState state) {
+    return ContactSidebar(
+      contacts: state.contacts,
+      selectedContactId: state.selectedContactId,
+      onSelect: compact
+          ? (id) {
+              _onSelectContact(id);
+              Navigator.of(context).pop();
+            }
+          : _onSelectContact,
+      onAdd: compact
+          ? () {
+              Navigator.of(context).pop();
+              _openCreateContactDialog();
+            }
+          : _openCreateContactDialog,
+      onDelete: compact
+          ? (id) {
+              Navigator.of(context).pop();
+              _deleteContact(id);
+            }
+          : _deleteContact,
+      showDeleteInList: !compact,
+      showDeleteInFooter: compact,
     );
   }
 
-  Widget _buildChatArea(Contact? selected) {
-    final theme = Theme.of(context);
+  Widget _buildChatArea(ChatViewState state) {
+    final selected = state.selectedContact;
     return Column(
       children: [
-        if (selected == null)
-          Expanded(
-            child: Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.chat_bubble_outline,
-                    size: 64,
-                    color: theme.colorScheme.onSurface.withValues(alpha: 0.3),
+        Expanded(
+          child: selected == null || state.messages.isEmpty
+              ? ChatEmptyState(hasContact: selected != null)
+              : ChatMessageList(
+                  messages: state.messages,
+                  controller: _scrollController,
+                  isTyping: state.isTyping,
+                  hasOlderMessages: state.hasOlderMessages,
+                  isLoadingOlderMessages: state.isLoadingOlderMessages,
+                  totalMessageCount: state.totalMessageCount,
+                  canRegenerateLastTurn: state.canRegenerateLastTurn,
+                  onLoadOlder: _loadOlderMessages,
+                  onRetry: (message) {
+                    final contactId = _provider.selectedContactId;
+                    if (contactId != null) {
+                      _provider.resendMessage(contactId, message.id);
+                    }
+                  },
+                  onGenerateImage: _generateImageForMessage,
+                  onRegenerate: _editAndRegenerateLastTurn,
+                  canCreateBranch: (message) =>
+                      _provider.conversationCheckpoints.any(
+                    (checkpoint) => checkpoint.sourceMessageId == message.id,
                   ),
-                  const SizedBox(height: 12),
-                  Text(
-                    '暂无对象，请先创建',
-                    style: TextStyle(
-                      color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
-                      fontSize: 16,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          )
-        else
-          Expanded(
-            child: _provider.messages.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          Icons.message_outlined,
-                          size: 64,
-                          color: theme.colorScheme.onSurface
-                              .withValues(alpha: 0.3),
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          '开始聊天吧',
-                          style: TextStyle(
-                            color: theme.colorScheme.onSurface
-                                .withValues(alpha: 0.6),
-                            fontSize: 16,
-                          ),
-                        ),
-                      ],
-                    ),
-                  )
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 16,
-                    ),
-                    itemCount: _provider.messages.length +
-                        (_provider.isTyping ? 1 : 0),
-                    itemBuilder: (_, index) {
-                      if (_provider.isTyping &&
-                          index == _provider.messages.length) {
-                        return const _TypingBubble();
-                      }
-                      final m = _provider.messages[index];
-                      return _AnimatedMessageBubble(
-                        child: _MessageBubble(
-                          message: m,
-                          onRetry: () {
-                            if (_provider.selectedContactId != null) {
-                              _provider.resendMessage(
-                                  _provider.selectedContactId!, m.id);
-                            }
-                          },
-                        ),
-                      );
-                    },
-                  ),
-          ),
-        if (_provider.error != null)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.error.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: theme.colorScheme.error.withValues(alpha: 0.3),
-                    width: 1,
-                  ),
+                  onCreateBranch: _createBranchFromMessage,
+                  onSpeak: _speakMessage,
+                  onStopSpeak: _stopSpeaking,
+                  isSpeaking: _mediaController.isSpeaking,
+                  onEdit: _editMessage,
+                  onDelete: _deleteMessage,
+                  onQuote: _quoteMessage,
+                  onGenerateCandidate: _generateCandidate,
+                  onShowCandidates: _showCandidates,
                 ),
-                child: Text(
-                  _provider.error!,
-                  style: TextStyle(
-                    color: theme.colorScheme.error,
-                    fontSize: 14,
-                  ),
-                ),
-              ),
-            ),
-          ),
+        ),
+        if (state.error != null) ChatErrorBanner(message: state.error!),
         const Divider(height: 1),
-        Container(
-          margin: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-          decoration: BoxDecoration(
-            color: theme.colorScheme.surface,
-            borderRadius: BorderRadius.circular(16),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.05),
-                spreadRadius: 0,
-                blurRadius: 8,
-                offset: const Offset(0, 2),
-              ),
-            ],
-            border: Border.all(
-              color: theme.colorScheme.outline.withValues(alpha: 0.1),
-              width: 1,
-            ),
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _inputController,
-                  minLines: 1,
-                  maxLines: 6,
-                  onSubmitted: (_) => _send(),
-                  decoration: InputDecoration(
-                    hintText: selected == null ? '请先创建对象' : '输入消息...',
-                    hintStyle: TextStyle(
-                      color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
-                    ),
-                    border: InputBorder.none,
-                    contentPadding: const EdgeInsets.fromLTRB(20, 12, 12, 12),
-                  ),
-                  style: TextStyle(
-                    fontSize: 15,
-                    color: theme.colorScheme.onSurface,
-                  ),
-                ),
-              ),
-              Container(
-                margin: const EdgeInsets.only(right: 8),
-                child: FilledButton(
-                  onPressed:
-                      _provider.isLoading || selected == null ? null : _send,
-                  style: FilledButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 24, vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    backgroundColor: theme.colorScheme.primary,
-                    foregroundColor: theme.colorScheme.onPrimary,
-                    elevation: 0,
-                  ),
-                  child: const Text('发送'),
-                ),
-              ),
-            ],
-          ),
+        MessageComposer(
+          controller: _inputController,
+          enabled: selected != null,
+          isGenerating: state.isLoading,
+          canCancel: state.canCancelGeneration,
+          onSend: _send,
+          onCancel: _provider.cancelGeneration,
         ),
       ],
-    );
-  }
-}
-
-class ApiConfigDraft {
-  const ApiConfigDraft({
-    required this.apiKey,
-    required this.baseUrl,
-    required this.model,
-    required this.systemPrompt,
-  });
-
-  final String apiKey;
-  final String baseUrl;
-  final String model;
-  final String systemPrompt;
-}
-
-class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({required this.message, required this.onRetry});
-
-  final Message message;
-  final VoidCallback onRetry;
-
-  @override
-  Widget build(BuildContext context) {
-    final isUser = message.role == MessageRole.user;
-    final isDebug = message.content.startsWith('【调试信息】');
-    final time =
-        '${message.createdAt.hour.toString().padLeft(2, '0')}:${message.createdAt.minute.toString().padLeft(2, '0')}';
-    final theme = Theme.of(context);
-
-    return Align(
-      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 640),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (!isUser)
-              Container(
-                margin: const EdgeInsets.only(right: 8),
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primary.withValues(alpha: 0.1),
-                  shape: BoxShape.circle,
-                ),
-                child: Center(
-                  child: Text(
-                    'AI',
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: theme.colorScheme.primary,
-                    ),
-                  ),
-                ),
-              ),
-            Expanded(
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 300),
-                curve: Curves.easeOut,
-                margin: const EdgeInsets.symmetric(vertical: 6),
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-                decoration: BoxDecoration(
-                  color: isDebug
-                      ? Colors.amber.shade50
-                      : isUser
-                          ? message.status == MessageStatus.failed
-                              ? Colors.red.shade50
-                              : theme.colorScheme.primary.withValues(alpha: 0.15)
-                          : theme.colorScheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.only(
-                    topLeft: const Radius.circular(18),
-                    topRight: const Radius.circular(18),
-                    bottomLeft: isUser
-                        ? const Radius.circular(18)
-                        : const Radius.circular(4),
-                    bottomRight: isUser
-                        ? const Radius.circular(4)
-                        : const Radius.circular(18),
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.05),
-                      spreadRadius: 0,
-                      blurRadius: 4,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-                ),
-                child: GestureDetector(
-                  onLongPress: () {
-                    showDialog(
-                      context: context,
-                      builder: (context) => AlertDialog(
-                        title: const Text('消息操作'),
-                        content: Text(message.content),
-                        actions: [
-                          TextButton(
-                            onPressed: () {
-                              Navigator.of(context).pop();
-                            },
-                            child: const Text('取消'),
-                          ),
-                          TextButton(
-                            onPressed: () {
-                              // 复制文本到剪贴板
-                              Clipboard.setData(
-                                  ClipboardData(text: message.content));
-                              // 显示复制成功提示
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('文本已复制到剪贴板')),
-                              );
-                              Navigator.of(context).pop();
-                            },
-                            child: const Text('复制'),
-                          ),
-                          if (isUser)
-                            TextButton(
-                              onPressed: onRetry,
-                              child: const Text('重发'),
-                            ),
-                        ],
-                      ),
-                    );
-                  },
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      SelectableText(
-                        message.content,
-                        style: const TextStyle(
-                          fontSize: 15,
-                          height: 1.4,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Flexible(
-                            child: Text(
-                              time,
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                  color: theme.colorScheme.onSurface
-                                      .withValues(alpha: 0.5)),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          if (isUser && message.status == MessageStatus.sending)
-                            Padding(
-                              padding: const EdgeInsets.only(left: 8),
-                              child: SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  valueColor: AlwaysStoppedAnimation<Color>(
-                                      theme.colorScheme.primary),
-                                ),
-                              ),
-                            ),
-                          if (isUser && message.status == MessageStatus.sent)
-                            Padding(
-                              padding: const EdgeInsets.only(left: 8),
-                              child: Icon(
-                                Icons.check,
-                                size: 16,
-                                color: theme.colorScheme.onSurface
-                                    .withValues(alpha: 0.5),
-                              ),
-                            ),
-                          if (isUser && message.status == MessageStatus.failed)
-                            const Padding(
-                              padding: EdgeInsets.only(left: 8),
-                              child: Icon(
-                                Icons.error_outline,
-                                size: 16,
-                                color: Colors.red,
-                              ),
-                            ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            if (isUser)
-              Container(
-                margin: const EdgeInsets.only(left: 8),
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primary.withValues(alpha: 0.1),
-                  shape: BoxShape.circle,
-                ),
-                child: Center(
-                  child: Icon(
-                    Icons.person,
-                    size: 18,
-                    color: theme.colorScheme.primary,
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _AnimatedMessageBubble extends StatefulWidget {
-  const _AnimatedMessageBubble({required this.child});
-
-  final Widget child;
-
-  @override
-  State<_AnimatedMessageBubble> createState() => _AnimatedMessageBubbleState();
-}
-
-class _AnimatedMessageBubbleState extends State<_AnimatedMessageBubble>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-  late Animation<double> _opacityAnimation;
-  late Animation<double> _scaleAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      duration: const Duration(milliseconds: 300),
-      vsync: this,
-    );
-    _opacityAnimation = Tween<double>(begin: 0, end: 1).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOut),
-    );
-    _scaleAnimation = Tween<double>(begin: 0.8, end: 1).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOut),
-    );
-    _controller.forward();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FadeTransition(
-      opacity: _opacityAnimation,
-      child: ScaleTransition(
-        scale: _scaleAnimation,
-        child: widget.child,
-      ),
-    );
-  }
-}
-
-class _TypingBubble extends StatefulWidget {
-  const _TypingBubble();
-
-  @override
-  State<_TypingBubble> createState() => _TypingBubbleState();
-}
-
-class _TypingBubbleState extends State<_TypingBubble>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      duration: const Duration(milliseconds: 1200),
-      vsync: this,
-    )..repeat();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 200),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              margin: const EdgeInsets.only(right: 8),
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: theme.colorScheme.primary.withValues(alpha: 0.1),
-                shape: BoxShape.circle,
-              ),
-              child: Center(
-                child: Text(
-                  'AI',
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    color: theme.colorScheme.primary,
-                  ),
-                ),
-              ),
-            ),
-            Container(
-              margin: const EdgeInsets.symmetric(vertical: 6),
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.only(
-                  topLeft: const Radius.circular(18),
-                  topRight: const Radius.circular(18),
-                  bottomLeft: const Radius.circular(4),
-                  bottomRight: const Radius.circular(18),
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.05),
-                    spreadRadius: 0,
-                    blurRadius: 4,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _buildDot(theme, delay: 0),
-                  _buildDot(theme, delay: 150),
-                  _buildDot(theme, delay: 300),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDot(ThemeData theme, {int delay = 0}) {
-    return FadeTransition(
-      opacity: Tween<double>(begin: 0.3, end: 1.0).animate(
-        CurvedAnimation(
-          parent: _controller,
-          curve: Interval(
-            delay / 1200, // 开始时间
-            (delay + 400) / 1200, // 结束时间
-            curve: Curves.easeInOut,
-          ),
-        ),
-      ),
-      child: Container(
-        width: 10,
-        height: 10,
-        margin: const EdgeInsets.symmetric(horizontal: 3),
-        decoration: BoxDecoration(
-          color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
-          shape: BoxShape.circle,
-        ),
-      ),
     );
   }
 }

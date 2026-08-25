@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../../infrastructure/services/tts_service.dart';
 import '../../data/models/contact.dart';
 
 class ContactDraft {
@@ -9,6 +10,7 @@ class ContactDraft {
     required this.fixedInput,
     required this.currentStates,
     required this.category,
+    this.voice = '',
     this.jsonString,
     this.naturalLanguage,
   });
@@ -18,6 +20,7 @@ class ContactDraft {
   final String fixedInput;
   final Map<String, String> currentStates;
   final ContactCategory category;
+  final String voice;
   final String? jsonString;
   final String? naturalLanguage;
 
@@ -42,6 +45,7 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
 
   final Map<String, String> _currentStates = <String, String>{};
   ContactCategory _category = ContactCategory.contact;
+  String _voiceId = VoiceOption.fallback.id;
   _EditorMode _mode = _EditorMode.normal;
 
   @override
@@ -67,8 +71,11 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: Text(_category == ContactCategory.story ? '创建故事'
-          : _category == ContactCategory.assistant ? '创建助手' : '创建角色'),
+      title: Text(_category == ContactCategory.story
+          ? '创建故事'
+          : _category == ContactCategory.assistant
+              ? '创建助手'
+              : '创建角色'),
       content: SizedBox(
         width: 520,
         child: _buildContent(),
@@ -98,39 +105,33 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
   }
 
   Widget _buildTypeSelector() {
-    return Row(
-      children: [
-        Expanded(
-          child: RadioListTile<ContactCategory>(
-            title: const Text('角色'),
-            value: ContactCategory.contact,
-            groupValue: _category,
-            onChanged: (value) {
-              if (value != null) setState(() => _category = value);
-            },
+    return RadioGroup<ContactCategory>(
+      groupValue: _category,
+      onChanged: (value) {
+        if (value != null) setState(() => _category = value);
+      },
+      child: const Row(
+        children: [
+          Expanded(
+            child: RadioListTile<ContactCategory>(
+              title: Text('角色'),
+              value: ContactCategory.contact,
+            ),
           ),
-        ),
-        Expanded(
-          child: RadioListTile<ContactCategory>(
-            title: const Text('故事'),
-            value: ContactCategory.story,
-            groupValue: _category,
-            onChanged: (value) {
-              if (value != null) setState(() => _category = value);
-            },
+          Expanded(
+            child: RadioListTile<ContactCategory>(
+              title: Text('故事'),
+              value: ContactCategory.story,
+            ),
           ),
-        ),
-        Expanded(
-          child: RadioListTile<ContactCategory>(
-            title: const Text('助手'),
-            value: ContactCategory.assistant,
-            groupValue: _category,
-            onChanged: (value) {
-              if (value != null) setState(() => _category = value);
-            },
+          Expanded(
+            child: RadioListTile<ContactCategory>(
+              title: Text('助手'),
+              value: ContactCategory.assistant,
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -141,8 +142,11 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
         TextField(
           controller: _nameCtrl,
           decoration: InputDecoration(
-            labelText: _category == ContactCategory.story ? '故事名称'
-                : _category == ContactCategory.assistant ? '助手名称' : '角色名称',
+            labelText: _category == ContactCategory.story
+                ? '故事名称'
+                : _category == ContactCategory.assistant
+                    ? '助手名称'
+                    : '角色名称',
           ),
         ),
         const SizedBox(height: 12),
@@ -153,7 +157,80 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
             hintText: '一个 emoji 或简短符号',
           ),
         ),
+        const SizedBox(height: 12),
+        _buildVoiceSelector(),
       ],
+    );
+  }
+
+  Widget _buildVoiceSelector() {
+    final selected = VoiceOption.findById(_voiceId) ?? VoiceOption.fallback;
+    return InputDecorator(
+      decoration: const InputDecoration(
+        labelText: '语音音色',
+        border: OutlineInputBorder(),
+        contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                isExpanded: true,
+                value: selected.id,
+                onChanged: (value) {
+                  if (value == null) return;
+                  setState(() => _voiceId = value);
+                },
+                items: [
+                  for (final v in VoiceOption.presets)
+                    DropdownMenuItem<String>(
+                      value: v.id,
+                      child: Row(
+                        children: [
+                          const Icon(Icons.record_voice_over_outlined,
+                              size: 18),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              v.label,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Text(
+                            v.locale,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurface
+                                  .withValues(alpha: 0.5),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          IconButton(
+            onPressed: () => _previewVoice(selected),
+            tooltip: '试听音色',
+            icon: const Icon(Icons.volume_up_outlined, size: 20),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _previewVoice(VoiceOption voice) {
+    final tts = TtsService.instance;
+    tts.stop();
+    tts.speak(
+      messageId: '__preview__',
+      text: '你好，我是语音助手。这是$voice',
+      voice: voice,
     );
   }
 
@@ -330,6 +407,7 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
       fixedInput: fixedInput,
       currentStates: Map<String, String>.from(_currentStates),
       category: _category,
+      voice: _voiceId,
       jsonString: jsonString,
       naturalLanguage: naturalLanguage,
     );
@@ -373,6 +451,7 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
             : _fixedInputCtrl.text.trim(),
         currentStates: Map<String, String>.from(_currentStates),
         category: _category,
+        voice: _voiceId,
         naturalLanguage: nlText,
       ),
     );

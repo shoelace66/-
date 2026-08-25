@@ -1,8 +1,13 @@
 import '../../features/chat/data/models/contact.dart';
+import '../../features/chat/domain/services/character_behavior_policy.dart';
+import '../../features/chat/domain/services/story_control_policy.dart';
+import '../../features/worldbook/domain/entities/world_book.dart';
 import '../data/models/app_settings.dart';
 
 class StructuredInputPromptComposer {
   StructuredInputPromptComposer({this.settings = const AppSettings()});
+
+  static const String protocolVersion = 'roleplay-memory-v2';
 
   final AppSettings settings;
 
@@ -60,6 +65,7 @@ class StructuredInputPromptComposer {
 
   void _writeMemorySection(StringBuffer buffer, Contact contact) {
     _writeStringList(buffer, '世界/背景知识', contact.worldKnowledge.items);
+    _writeWorldBookSection(buffer, contact.worldBook);
     _writeStringList(buffer, '自我认知', contact.selfKnowledge.items);
     _writeStringList(buffer, '用户认知', contact.userKnowledge.items);
 
@@ -106,6 +112,15 @@ class StructuredInputPromptComposer {
       if (key.isEmpty) continue;
       buffer.writeln('$key: ${value.isEmpty ? "(empty)" : value}');
     }
+  }
+
+  void _writeWorldBookSection(StringBuffer buffer, WorldBook book) {
+    if (book.isEmpty) return;
+    final prompt = book.toPromptSection();
+    if (prompt.isEmpty) return;
+    buffer.writeln('### 世界书');
+    buffer.writeln(prompt);
+    buffer.writeln();
   }
 
   String _buildContactPrompt(
@@ -171,25 +186,32 @@ $mustSummaryRule
 
   static String _buildJsonFormat({bool isStory = false}) {
     final typeLabel = isStory ? '故事' : '角色';
+    final modeRules = isStory
+        ? const StoryControlPolicy().promptRules()
+        : const CharacterBehaviorPolicy().promptRules();
+    final numberedModeRules = <String>[
+      for (int i = 0; i < modeRules.length; i++) '${10 + i}. ${modeRules[i]}',
+    ].join('\n');
 
     return '''
 必须输出合法 JSON，且仅包含以下结构：
 {
-  "reply": "$typeLabel回复内容",
+  "protocolVersion": "$protocolVersion",
   "memoryPatch": {
+    "summary": {"description": "往期事件的综合总结，300字以内。可选输出（仅在场景/话题结束或本轮要求时输出）", "keywords": ["总结关键词1", "总结关键词2"]},
+    "eventBrief": {"description": "在正文前确定的本轮规范事件，300字以内", "keywords": ["实体关键词1"], "theme": ["主题/氛围1"]},
+    "relatedEventIds": [0, 3],
     "worldKnowledge": ["重要的新世界/背景知识，可省略"],
     "selfKnowledge": ["重要的新自我认知，可省略"],
     "userKnowledge": ["重要的新用户认知，可省略"],
-    "summary": {"description": "往期事件的综合总结，300字以内。可选输出（仅在场景/话题结束或本轮要求时输出）", "keywords": ["总结关键词1", "总结关键词2"]},
-    "eventBrief": {"description": "本次事件的缩写概述，300字以内", "keywords": ["实体关键词1"], "theme": ["主题/氛围1"]},
-    "relatedEventIds": [0, 3],
     "belongings": ["(新增)物品名", "(提及)物品名"],
     "currentStates": {"用户创建的状态key": "新的状态value"}
-  }
+  },
+  "reply": "$typeLabel回复内容"
 }
 
 输出要求：
-1. 必须输出 JSON，不要包含额外说明。
+1. 必须输出 JSON，不要包含额外说明，并严格保持模板字段顺序：先 protocolVersion，再完整生成 memoryPatch，最后生成 reply。
 2. 字段无变化时可以省略整个字段。
 3. currentStates 只能包含输入中"当前状态"已有的 key。
 4. keywords 是实体关键词：包含人物、地点、物品等具体实体，支持不同粒度共存（如"伞"和"花伞"）。应包含文段中出现的以及通过上下文/记忆可推断的内容。
@@ -200,6 +222,9 @@ $mustSummaryRule
    - **不要连环关联**：不能因为 A 与 B 有关、B 与 C 有关，就把 A→B→C 都列上；只列与"本次事件"直接相关的那一段。
    - 编号见"事件记忆"中的 [编号]，用于建立事件关联图（边越多并不代表越好，稀疏但精准的图更有用）。
 7. summary 仅在场景/话题完结或本轮强制要求时输出，不要每轮都输出。
+8. eventBrief 每轮必须输出。它不是对 reply 的事后摘要，而是先确定“本轮发生什么”的规范事件；reply 必须忠实展开 eventBrief，不得另行改变事件结果。
+9. summary 只概括“往期待总结事件”，不得把尚未生成的本轮 reply 混入 summary。
+$numberedModeRules
 ''';
   }
 
@@ -244,7 +269,7 @@ $mustSummaryRule
       _buildContactPrompt(contact,
           needSummary: mustSummarize,
           pendingSummaryEvents: pendingSummaryEvents),
-      '{"reply":"所有指令均已载入","memoryPatch":{}}',
+      '{"protocolVersion":"$protocolVersion","memoryPatch":{},"reply":"所有指令均已载入"}',
     ];
     return parts.join('\n\n');
   }

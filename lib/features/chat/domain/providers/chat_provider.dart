@@ -1,22 +1,45 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../../core/constants/api_constants.dart';
 import '../../../../core/constants/app_strings.dart';
 import '../../../../core/data/models/app_settings.dart';
+import '../../../../core/data/models/opencode_connection_config.dart';
+import '../../../../core/data/models/provider_settings.dart';
+import '../../../../core/data/datasources/shared_preferences_settings_store.dart';
+import '../../../../core/domain/repositories/settings_store.dart';
 import '../../../../core/utils/chinese_tokenizer_service.dart';
+import '../../../../core/utils/image_prompt_polisher.dart';
 import '../../../../core/utils/structured_input_prompt_composer.dart';
 import '../../../../core/utils/structured_output_regex_parser.dart';
 import '../../../../infrastructure/services/ai_service.dart';
+import '../../../../infrastructure/services/image_generation_service.dart';
 import '../../../../infrastructure/services/opencode_service.dart';
+import '../../../../infrastructure/services/tts_service.dart';
 import '../../data/datasources/chat_local_storage.dart';
+import '../../data/datasources/legacy_chat_snapshot_source.dart';
+import '../../data/datasources/sqlite_chat_persistence.dart';
 import '../../data/models/contact.dart';
 import '../../data/models/message.dart';
 import '../../data/repositories/chat_repository.dart';
+import '../../application/migrate_legacy_chat_data.dart';
+import '../../application/chat_view_state.dart';
+import '../../application/conversation_timeline_use_case.dart';
+import '../../application/conversation_usage_estimator.dart';
+import '../repositories/chat_persistence.dart';
+import '../repositories/conversation_timeline.dart';
 import '../services/heartbeat_manager.dart';
 import '../services/input_formatter.dart';
+import '../services/contact_import_parser.dart';
+import '../services/memory_cascade_policy.dart';
+import '../services/chat_backup_codec.dart';
+import '../services/memory_graph_service.dart';
+import '../services/memory_patch_reducer.dart';
+import '../services/memory_recall_service.dart';
+import '../services/memory_revision_service.dart';
+import '../../../worldbook/domain/entities/world_book.dart';
 
 /// 聊天状态管理器
 ///
@@ -29,6 +52,8 @@ import '../services/input_formatter.dart';
 ///
 /// 使用 [ChangeNotifier] 模式，UI层通过监听此Provider来响应状态变化
 class ChatProvider extends ChangeNotifier {
+  static const int _messagePageSize = 100;
+
   /// 构造函数
   ///
   /// 支持依赖注入，便于单元测试
@@ -41,17 +66,16 @@ class ChatProvider extends ChangeNotifier {
     InputFormatterService? formatter,
     HeartbeatManager? heartbeat,
     ChatAgentStore? agentStore,
+    ChatPersistence? persistence,
+    SettingsStore? settingsStore,
   })  : _formatter = formatter ?? InputFormatterService(),
         _heartbeat = heartbeat ?? HeartbeatManager(),
         _repository = repository ?? ChatRepository(aiService: AiService()),
-        _agentStore = agentStore ?? ChatAgentStore() {
-    // 加载应用设置
-    _loadAppSettings();
-    // 启动心跳检测，监听连接状态变化
-    _heartbeat.start((status) {
-      connectionStatus = status;
-      notifyListeners();
-    });
+        _agentStore = agentStore ?? ChatAgentStore(),
+        _persistence = persistence ?? SqliteChatPersistence(),
+        _settingsStore =
+            settingsStore ?? const SharedPreferencesSettingsStore() {
+    _timelineUseCase = ConversationTimelineUseCase(_persistence);
   }
 
   // ==================== 常量配置 ====================
@@ -59,47 +83,127 @@ class ChatProvider extends ChangeNotifier {
   /// 应用设置
   AppSettings _appSettings = const AppSettings();
 
+  /// API 提供商（LLM / 生图 / TTS）
+  ProviderSettings _providerSettings = const ProviderSettings();
+
   /// 获取应用设置
   AppSettings get appSettings => _appSettings;
 
+  /// 获取 provider 设置
+  ProviderSettings get providerSettings => _providerSettings;
+
   /// 加载应用设置
   Future<void> _loadAppSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(AppStrings.appSettingsKey);
-    if (raw != null && raw.isNotEmpty) {
-      try {
-        final decoded = jsonDecode(raw);
-        if (decoded is Map) {
-          _appSettings = AppSettings.fromJson(
-            decoded.map((k, v) => MapEntry(k.toString(), v)),
-          );
-        }
-      } catch (_) {}
+    final appJson = await _settingsStore.readJson(AppStrings.appSettingsKey);
+    if (appJson != null) {
+      _appSettings = AppSettings.fromJson(appJson);
     }
 
-    // 加载 opencode 连接配置
-    final opencodeRaw = prefs.getString(AppStrings.opencodeConnectionKey);
-    if (opencodeRaw != null && opencodeRaw.isNotEmpty) {
-      try {
-        final decoded = jsonDecode(opencodeRaw);
-        if (decoded is Map) {
-          _opencodeService.updateConfig(
-            OpencodeConnectionConfig.fromJson(
-              decoded.map((k, v) => MapEntry(k.toString(), v)),
-            ),
-          );
-        }
-      } catch (_) {}
+    // 加载 provider 配置（LLM / 生图 / TTS）
+    final providerJson =
+        await _settingsStore.readJson(AppStrings.providerSettingsKey);
+    if (providerJson != null) {
+      _providerSettings = ProviderSettings.fromJson(providerJson);
     }
+    _applyProviderSettingsToRuntime(_providerSettings);
+
+    // 加载 opencode 连接配置
+    final opencodeJson =
+        await _settingsStore.readJson(AppStrings.opencodeConnectionKey);
+    if (opencodeJson != null) {
+      _opencodeService.updateConfig(
+        OpencodeConnectionConfig.fromJson(opencodeJson),
+      );
+    }
+  }
+
+  /// 把 ProviderSettings 同步到运行时单例（ApiConstants / 单例服务）
+  void _applyProviderSettingsToRuntime(ProviderSettings settings) {
+    final llm = settings.llm;
+    ApiConstants.runtimeApiKey = llm.apiKey;
+    ApiConstants.runtimeBaseUrl = llm.baseUrl;
+    ApiConstants.runtimeModel = llm.model;
+    ApiConstants.runtimeTimeoutSeconds = llm.parameters.timeoutSeconds;
+    ImageGenerationService.instance.updateProfile(settings.image);
+    TtsService.instance.updateProfile(settings.tts);
+  }
+
+  /// 保存 provider 配置（LLM / 生图 / TTS 完整合集）
+  Future<void> saveProviderSettings(ProviderSettings settings) async {
+    _providerSettings = settings;
+    _applyProviderSettingsToRuntime(settings);
+    await _settingsStore.writeJson(
+      AppStrings.providerSettingsKey,
+      settings.toJson(),
+    );
+    // 同步兼容旧 agent settings（让旧 API 读取能继续工作）
+    final agent = await _agentStore.readAgentSettings();
+    agent['apiKey'] = settings.llm.apiKey;
+    agent['apiBaseUrl'] = settings.llm.baseUrl;
+    agent['apiModel'] = settings.llm.model;
+    await _agentStore.saveAgentSettings(agent);
+    notifyListeners();
+  }
+
+  List<LlmProfile> get llmProfiles => List<LlmProfile>.unmodifiable(
+        <LlmProfile>[
+          _providerSettings.llm,
+          ..._providerSettings.fallbackLlmProfiles,
+        ],
+      );
+
+  Future<void> activateLlmProfile(LlmProfile profile) async {
+    final current = _providerSettings.llm;
+    final remaining = _providerSettings.fallbackLlmProfiles
+        .where((candidate) => !identical(candidate, profile))
+        .toList(growable: true);
+    if (!identical(current, profile)) remaining.insert(0, current);
+    await saveProviderSettings(
+      _providerSettings.copyWith(
+        llm: profile,
+        fallbackLlmProfiles: remaining,
+      ),
+    );
+  }
+
+  Future<Map<LlmProfile, String?>> checkLlmProfiles() async {
+    final results = <LlmProfile, String?>{};
+    for (final profile in llmProfiles) {
+      try {
+        await _repository.aiService.ask(
+          '只回复 OK',
+          contactId: 'provider-health-check',
+          contactName: 'System',
+          profile: profile,
+        );
+        results[profile] = null;
+      } catch (error) {
+        results[profile] = error.toString();
+      }
+    }
+    return results;
+  }
+
+  Future<void> saveAppSettings(AppSettings settings) async {
+    _appSettings = settings;
+    await _settingsStore.writeJson(
+      AppStrings.appSettingsKey,
+      settings.toJson(),
+    );
+    notifyListeners();
+  }
+
+  /// 是否已经有 provider 配置持久化
+  Future<bool> _hasProviderSettings() async {
+    return _settingsStore.contains(AppStrings.providerSettingsKey);
   }
 
   /// 保存 opencode 连接配置
   Future<void> saveOpencodeConfig(OpencodeConnectionConfig config) async {
     _opencodeService.updateConfig(config);
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
+    await _settingsStore.writeJson(
       AppStrings.opencodeConnectionKey,
-      jsonEncode(config.toJson()),
+      config.toJson(),
     );
     notifyListeners();
   }
@@ -107,21 +211,15 @@ class ChatProvider extends ChangeNotifier {
   /// 获取 opencode 连接配置
   OpencodeConnectionConfig get opencodeConfig => _opencodeService.config;
 
-  /// 获取 opencode 服务实例
-  OpencodeService get opencodeService => _opencodeService;
+  Future<String?> testOpencodeConnection(
+      OpencodeConnectionConfig config) async {
+    final result = await OpencodeService(config: config).testConnection();
+    return result.success ? null : result.error ?? '未知连接错误';
+  }
 
   /// 事件总结阈值
   int get _summaryThreshold => _appSettings.summaryThreshold;
   int get _ultraSummaryThreshold => _appSettings.ultraSummaryThreshold;
-
-  /// 短期事件队列最大容量
-  int get _maxShortQueue => _appSettings.maxShortQueue;
-
-  /// 长期事件队列最大容量
-  int get _maxLongQueue => _appSettings.maxLongQueue;
-
-  /// 超长期事件队列最大容量
-  int get _maxUltraQueue => _appSettings.maxUltraQueue;
 
   /// 短期事件输入LLM数量
   int get _maxShortTermEvents => _appSettings.maxShortTermEvents;
@@ -166,6 +264,31 @@ class ChatProvider extends ChangeNotifier {
   /// 使用SharedPreferences存储联系人、消息历史、API设置等
   final ChatAgentStore _agentStore;
 
+  final ChatPersistence _persistence;
+  late final ConversationTimelineUseCase _timelineUseCase;
+
+  final SettingsStore _settingsStore;
+
+  final ContactImportParser _contactImportParser = const ContactImportParser();
+
+  final ChatBackupCodec _chatBackupCodec = const ChatBackupCodec();
+  final ConversationUsageEstimator _usageEstimator =
+      const ConversationUsageEstimator();
+
+  /// 三级记忆级联判定（纯业务规则）。
+  final MemoryCascadePolicy _memoryCascadePolicy = const MemoryCascadePolicy();
+
+  final MemoryGraphService _memoryGraphService = const MemoryGraphService();
+
+  /// LLM 记忆补丁解析与联系人字段归并（纯业务规则）。
+  final MemoryPatchReducer _memoryPatchReducer = const MemoryPatchReducer();
+
+  /// 本地事件图召回与关系清理。
+  final MemoryRecallService _memoryRecallService = const MemoryRecallService();
+
+  final MemoryRevisionService _memoryRevisionService =
+      const MemoryRevisionService();
+
   /// opencode CLI 交互服务
   ///
   /// 用于助手类型联系人，通过网络连接到运行 opencode 的 PC
@@ -181,6 +304,13 @@ class ChatProvider extends ChangeNotifier {
   /// Key为联系人ID，Value为该联系人的消息历史
   final Map<String, List<Message>> _messagesByContact =
       <String, List<Message>>{};
+  final Map<String, int> _loadedStartSequenceByContact = <String, int>{};
+  final Map<String, int> _messageCountByContact = <String, int>{};
+  final Map<String, bool> _hasOlderMessagesByContact = <String, bool>{};
+  final Map<String, List<ConversationBranch>> _branchesByContact =
+      <String, List<ConversationBranch>>{};
+  final Map<String, List<ConversationCheckpoint>> _checkpointsByContact =
+      <String, List<ConversationCheckpoint>>{};
 
   /// 临时关键词缓存
   ///
@@ -188,6 +318,10 @@ class ChatProvider extends ChangeNotifier {
   /// 用于关联事件搜索
   final Map<String, List<String>> _tempKeywordsByContact =
       <String, List<String>>{};
+
+  final Map<String, MemoryRevisionRecord> _lastMemoryRevisions =
+      <String, MemoryRevisionRecord>{};
+  final Map<String, Set<String>> _lockedMemoryNodeIds = <String, Set<String>>{};
 
   /// ==================== 撤回功能相关 ====================
 
@@ -201,15 +335,6 @@ class ChatProvider extends ChangeNotifier {
   /// 当前选中的联系人ID
   String? _selectedContactId;
 
-  /// API密钥
-  String _apiKey = '';
-
-  /// API Base URL
-  String _apiBaseUrl = 'https://api.deepseek.com';
-
-  /// API Model
-  String _apiModel = 'deepseek-chat';
-
   /// 系统提示词
   ///
   /// 作为基础系统提示，会与联系人信息合并后发送给LLM
@@ -218,41 +343,183 @@ class ChatProvider extends ChangeNotifier {
   // ==================== 公开状态（UI可直接访问） ====================
 
   /// 是否正在加载中
-  bool isLoading = false;
+  bool _isLoading = false;
+  bool get isLoading => _isLoading;
 
   /// AI是否正在输入（用于显示打字指示器）
-  bool isTyping = false;
+  bool _isTyping = false;
+  bool get isTyping => _isTyping;
+
+  /// Whether an older message page is currently being prepended.
+  bool _isLoadingOlderMessages = false;
+  bool get isLoadingOlderMessages => _isLoadingOlderMessages;
+
+  Completer<void>? _generationCancellation;
+  ChatGenerationStatus _generationStatus = ChatGenerationStatus.idle;
 
   /// 是否已完成初始化
-  bool isInitialized = false;
+  ChatInitializationState _initialization =
+      const ChatInitializationState.initial();
+  ChatInitializationState get initialization => _initialization;
+  bool get isInitialized => _initialization.isReady;
 
   /// 是否处于调试模式
   ///
   /// 调试模式下会显示完整的Prompt和关键词提取信息
-  bool isDebugMode = false;
+  bool _isDebugMode = false;
+  bool get isDebugMode => _isDebugMode;
 
   /// 错误信息
-  String? error;
+  String? _error;
+  String? get error => _error;
 
   /// 当前连接状态
-  ConnectionStatus connectionStatus = ConnectionStatus.connected;
+  ConnectionStatus _connectionStatus = ConnectionStatus.connected;
+  ConnectionStatus get connectionStatus => _connectionStatus;
 
   // ==================== Getters ====================
 
   /// 获取不可修改的联系人列表副本
   List<Contact> get contacts => List<Contact>.unmodifiable(_contacts);
 
+  ChatViewState get state => ChatViewState(
+        initialization: _initialization,
+        contacts: _contacts,
+        messages: messages,
+        branches: conversationBranches,
+        checkpoints: conversationCheckpoints,
+        selectedContactId: _selectedContactId,
+        selectedContact: selectedContact,
+        isLoading: _isLoading,
+        isTyping: _isTyping,
+        isLoadingOlderMessages: _isLoadingOlderMessages,
+        hasOlderMessages: hasOlderMessages,
+        totalMessageCount: totalMessageCount,
+        isDebugMode: _isDebugMode,
+        canCancelGeneration: canCancelGeneration,
+        canRecall: canRecall,
+        canRegenerateLastTurn: canRegenerateLastTurn,
+        error: _error,
+        connectionStatus: _connectionStatus,
+        generationStatus: _generationStatus,
+      );
+
+  bool get canCancelGeneration =>
+      isLoading &&
+      _generationCancellation != null &&
+      !_generationCancellation!.isCompleted;
+
+  void cancelGeneration() {
+    final cancellation = _generationCancellation;
+    if (cancellation == null || cancellation.isCompleted) return;
+    cancellation.complete();
+    _isTyping = false;
+    _generationStatus = ChatGenerationStatus.cancelled;
+    notifyListeners();
+  }
+
+  Future<T> _awaitGeneration<T>(Future<T> operation) {
+    final cancellation = _generationCancellation;
+    if (cancellation == null) return operation;
+    return Future.any<T>(<Future<T>>[
+      operation,
+      cancellation.future.then<T>(
+        (_) => throw const _GenerationCancelled(),
+      ),
+    ]);
+  }
+
+  Future<void> _consumeGenerationStream(
+    Stream<String> stream,
+    void Function(String chunk) onChunk,
+  ) async {
+    final iterator = StreamIterator<String>(stream);
+    try {
+      while (true) {
+        final cancellation = _generationCancellation;
+        final hasNext = cancellation == null
+            ? await iterator.moveNext()
+            : await Future.any<bool>([
+                iterator.moveNext(),
+                cancellation.future.then<bool>(
+                  (_) => throw const _GenerationCancelled(),
+                ),
+              ]);
+        if (!hasNext) return;
+        onChunk(iterator.current);
+      }
+    } finally {
+      // Cancellation must release the UI state immediately. In particular, an
+      // async* fallback wrapper may wait for its current upstream stream to
+      // close before its cancellation future completes. Start cleanup, but do
+      // not let an uncooperative provider keep sendMessage suspended.
+      unawaited(iterator.cancel());
+    }
+  }
+
+  Future<Message> _askRoleplayWithFallback({
+    required Contact contact,
+    required Message userMessage,
+    required String systemPrompt,
+  }) async {
+    AiServiceException? lastError;
+    for (final profile in llmProfiles.where((profile) => profile.hasApiKey)) {
+      try {
+        return await _awaitGeneration(_repository.askAi(
+          contactId: contact.id,
+          contactName: contact.name,
+          userMessage: userMessage,
+          systemPrompt: systemPrompt,
+          settings: _appSettings,
+          profile: profile,
+        ));
+      } on AiServiceException catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError ?? const AiServiceException('没有可用的 LLM Profile。');
+  }
+
+  Stream<String> _streamRoleplayWithFallback({
+    required Contact contact,
+    required Message userMessage,
+    required String systemPrompt,
+  }) async* {
+    AiServiceException? lastError;
+    for (final profile in llmProfiles.where((profile) => profile.hasApiKey)) {
+      var emitted = false;
+      try {
+        await for (final chunk in _repository.askAiStream(
+          contactId: contact.id,
+          contactName: contact.name,
+          userMessage: userMessage,
+          systemPrompt: systemPrompt,
+          settings: _appSettings,
+          profile: profile,
+        )) {
+          emitted = true;
+          yield chunk;
+        }
+        return;
+      } on AiServiceException catch (error) {
+        lastError = error;
+        if (emitted) rethrow;
+      }
+    }
+    throw lastError ?? const AiServiceException('没有可用的 LLM Profile。');
+  }
+
   /// 获取当前选中的联系人ID
   String? get selectedContactId => _selectedContactId;
 
   /// 获取当前API密钥
-  String get currentApiKey => _apiKey;
+  String get currentApiKey => _providerSettings.llm.apiKey;
 
   /// 获取当前API Base URL
-  String get currentApiBaseUrl => _apiBaseUrl;
+  String get currentApiBaseUrl => _providerSettings.llm.baseUrl;
 
   /// 获取当前API Model
-  String get currentApiModel => _apiModel;
+  String get currentApiModel => _providerSettings.llm.model;
 
   /// 获取当前系统提示词
   String get currentSystemPrompt => _systemPrompt;
@@ -278,11 +545,94 @@ class ChatProvider extends ChangeNotifier {
     return List<Message>.unmodifiable(_messagesByContact[id] ?? <Message>[]);
   }
 
+  bool get hasOlderMessages {
+    final id = _selectedContactId;
+    return id != null && (_hasOlderMessagesByContact[id] ?? false);
+  }
+
+  int get totalMessageCount {
+    final id = _selectedContactId;
+    if (id == null) return 0;
+    return _messageCountByContact[id] ?? (_messagesByContact[id]?.length ?? 0);
+  }
+
+  List<ConversationBranch> get conversationBranches {
+    final id = _selectedContactId;
+    if (id == null) return const <ConversationBranch>[];
+    return List<ConversationBranch>.unmodifiable(
+      _branchesByContact[id] ?? const <ConversationBranch>[],
+    );
+  }
+
+  List<ConversationCheckpoint> get conversationCheckpoints {
+    final id = _selectedContactId;
+    if (id == null) return const <ConversationCheckpoint>[];
+    return List<ConversationCheckpoint>.unmodifiable(
+      _checkpointsByContact[id] ?? const <ConversationCheckpoint>[],
+    );
+  }
+
+  ConversationBranch? get activeConversationBranch {
+    for (final branch in conversationBranches) {
+      if (branch.isActive) return branch;
+    }
+    return null;
+  }
+
+  ConversationUsageEstimate get conversationUsage =>
+      _usageEstimator.estimate(messages, _providerSettings.llm);
+
   /// 是否可以撤回最近一轮对话
   bool get canRecall {
     final result = _lastContactSnapshot != null;
     debugPrint('[canRecall] result=$result, snapshot=$_lastContactSnapshot');
     return result;
+  }
+
+  bool get canRegenerateLastTurn =>
+      _lastContactSnapshot?.id == _selectedContactId &&
+      lastTurnUserInput != null &&
+      !isLoading;
+
+  String? get lastTurnUserInput {
+    final contactId = _selectedContactId;
+    final before = _lastMessagesSnapshot;
+    if (contactId == null || before == null) return null;
+    final current = _messagesByContact[contactId] ?? const <Message>[];
+    for (final message in current.skip(before.length)) {
+      if (message.role == MessageRole.user &&
+          !message.content.startsWith('【调试信息】')) {
+        return message.content;
+      }
+    }
+    return null;
+  }
+
+  Future<bool> regenerateLastTurn({String? editedInput}) async {
+    final original = lastTurnUserInput;
+    final input = (editedInput ?? original ?? '').trim();
+    if (!canRegenerateLastTurn || input.isEmpty) return false;
+    if (!await recallLastTurn()) return false;
+    await sendMessage(input);
+    return error == null;
+  }
+
+  List<EventNode> get memoryNodes {
+    final graph = selectedContact?.eventGraph;
+    if (graph == null) return const <EventNode>[];
+    return List<EventNode>.unmodifiable(<EventNode>[
+      ...graph.shortTermQueue,
+      ...graph.longTermQueue,
+      ...graph.ultraLongTermQueue,
+    ]);
+  }
+
+  bool get canUndoMemoryRevision {
+    final contact = selectedContact;
+    if (contact == null) return false;
+    final record = _lastMemoryRevisions[contact.id];
+    return record != null &&
+        record.graphTurnCount == contact.eventGraph.turnCount;
   }
 
   // ==================== 初始化与配置 ====================
@@ -296,72 +646,489 @@ class ChatProvider extends ChangeNotifier {
   ///
   /// 如果联系人列表为空，自动创建一个演示联系人
   Future<void> initialize() async {
-    try {
-      // 初始化中文分词服务
-      await _tokenizer.init();
-    } catch (e) {
-      debugPrint('ChatProvider.initialize: 中文分词服务初始化失败: $e');
-      // 继续初始化
+    if (_initialization.status == ChatInitializationStatus.loading ||
+        _initialization.status == ChatInitializationStatus.ready) {
+      return;
     }
+    _initialization = const ChatInitializationState.loading();
+    _error = null;
+    notifyListeners();
 
     try {
-      // 加载Agent设置
-      final settings = await _agentStore.readAgentSettings();
-      _apiKey = (settings['apiKey'] ?? '').toString();
-      _apiBaseUrl = (settings['apiBaseUrl'] ?? 'https://api.deepseek.com').toString();
-      _apiModel = (settings['apiModel'] ?? 'deepseek-chat').toString();
-      _systemPrompt = (settings['systemPrompt'] ?? _systemPrompt).toString();
-      ApiConstants.runtimeApiKey = _apiKey;
-      ApiConstants.runtimeBaseUrl = _apiBaseUrl;
-      ApiConstants.runtimeModel = _apiModel;
-    } catch (e) {
-      debugPrint('ChatProvider.initialize: 加载设置失败: $e');
+      try {
+        await _loadAppSettings();
+        final settings = await _agentStore.readAgentSettings();
+        _systemPrompt = (settings['systemPrompt'] ?? _systemPrompt).toString();
+        if (!await _hasProviderSettings()) {
+          await saveProviderSettings(
+            ProviderSettings(
+              llm: LlmProfile(
+                apiKey: (settings['apiKey'] ?? '').toString(),
+                baseUrl: (settings['apiBaseUrl'] ?? 'https://api.deepseek.com')
+                    .toString(),
+                model: (settings['apiModel'] ?? 'deepseek-chat').toString(),
+              ),
+            ),
+          );
+        }
+      } catch (cause) {
+        throw ChatInitializationFailure('设置', cause);
+      }
+
+      try {
+        await _tokenizer.init();
+      } catch (cause) {
+        debugPrint('中文分词模块不可用，将使用降级分词：$cause');
+      }
+
+      try {
+        await _initializeLocalData();
+      } catch (cause) {
+        throw ChatInitializationFailure('本地数据库', cause);
+      }
+
+      _heartbeat.start((status) {
+        _connectionStatus = status;
+        notifyListeners();
+      });
+      _initialization = const ChatInitializationState.ready();
+      _error = null;
+      notifyListeners();
+    } on ChatInitializationFailure catch (failure) {
+      _initialization = ChatInitializationState.failure(
+        module: failure.module,
+        message: failure.cause.toString(),
+      );
+      _error = failure.toString();
+      notifyListeners();
+      rethrow;
     }
+  }
 
-    try {
-      // 加载联系人和消息
-      final localContacts = await _agentStore.readContacts();
-      final localMessages = await _agentStore.readMessagesByContact();
-      _contacts
-        ..clear()
-        ..addAll(localContacts);
+  Future<void> _initializeLocalData() async {
+    await _persistence.initialize();
+    await MigrateLegacyChatData(
+      target: _persistence,
+      source: SharedPreferencesLegacyChatSnapshotSource(_agentStore),
+    ).execute();
+    final paginated = _persistence is PaginatedChatPersistence;
+    final snapshot = paginated ? null : await _persistence.readSnapshot();
+    final localContacts = paginated
+        ? await (_persistence as PaginatedChatPersistence).readContacts()
+        : snapshot!.contacts;
+    final localMessages =
+        snapshot?.messagesByContact ?? const <String, List<Message>>{};
+    _contacts
+      ..clear()
+      ..addAll(localContacts);
+    _messagesByContact.clear();
+    _loadedStartSequenceByContact.clear();
+    _messageCountByContact.clear();
+    _hasOlderMessagesByContact.clear();
+    _branchesByContact.clear();
+    _checkpointsByContact.clear();
+    _lastMemoryRevisions.clear();
+    _lockedMemoryNodeIds.clear();
+    _selectedContactId = _contacts.firstOrNull?.id;
 
-      // 初始化消息列表
-      if (_contacts.isNotEmpty) {
-        _selectedContactId = _contacts.first.id;
-        for (final c in _contacts) {
-          _messagesByContact[c.id] =
-              List<Message>.from(localMessages[c.id] ?? const <Message>[]);
+    for (final contact in _contacts) {
+      if (!paginated) {
+        final loaded = List<Message>.from(
+          localMessages[contact.id] ?? const <Message>[],
+        );
+        _messagesByContact[contact.id] = loaded;
+        _loadedStartSequenceByContact[contact.id] = 0;
+        _messageCountByContact[contact.id] = loaded.length;
+        _hasOlderMessagesByContact[contact.id] = false;
+      }
+      final revisionRaw =
+          await _persistence.readMetadata(_memoryRevisionKey(contact.id));
+      if (revisionRaw != null && revisionRaw.trim().isNotEmpty) {
+        try {
+          final decoded = jsonDecode(revisionRaw);
+          if (decoded is Map) {
+            _lastMemoryRevisions[contact.id] = MemoryRevisionRecord.fromJson(
+              Map<String, dynamic>.from(decoded),
+            );
+          }
+        } catch (cause) {
+          debugPrint('忽略损坏的记忆修订记录 ${contact.id}: $cause');
         }
       }
-    } catch (e) {
-      debugPrint('ChatProvider.initialize: 加载联系人/消息失败: $e');
+      final locksRaw =
+          await _persistence.readMetadata(_memoryLocksKey(contact.id));
+      if (locksRaw != null && locksRaw.isNotEmpty) {
+        try {
+          final decoded = jsonDecode(locksRaw);
+          if (decoded is List) {
+            _lockedMemoryNodeIds[contact.id] =
+                decoded.map((value) => value.toString()).toSet();
+          }
+        } catch (cause) {
+          debugPrint('忽略损坏的记忆锁记录 ${contact.id}: $cause');
+        }
+      }
     }
 
-    isInitialized = true;
+    final selectedId = _selectedContactId;
+    if (selectedId != null) {
+      if (paginated) await _loadInitialMessagePage(selectedId);
+      await _refreshTimeline(selectedId);
+    }
+  }
+
+  Future<void> _loadInitialMessagePage(String contactId) async {
+    final persistence = _persistence;
+    if (persistence is! PaginatedChatPersistence) return;
+    final paginated = persistence as PaginatedChatPersistence;
+    final page = await paginated.readMessagesPage(
+      contactId: contactId,
+      limit: _messagePageSize,
+    );
+    _messagesByContact[contactId] = List<Message>.from(page.messages);
+    _loadedStartSequenceByContact[contactId] = page.startSequence;
+    _messageCountByContact[contactId] = page.totalCount;
+    _hasOlderMessagesByContact[contactId] = page.hasOlder;
+  }
+
+  Future<bool> loadOlderMessages() async {
+    final contactId = _selectedContactId;
+    final persistence = _persistence;
+    if (contactId == null ||
+        persistence is! PaginatedChatPersistence ||
+        isLoadingOlderMessages ||
+        !(_hasOlderMessagesByContact[contactId] ?? false)) {
+      return false;
+    }
+    final paginated = persistence as PaginatedChatPersistence;
+    _isLoadingOlderMessages = true;
     notifyListeners();
+    try {
+      final page = await paginated.readMessagesPage(
+        contactId: contactId,
+        beforeSequence: _loadedStartSequenceByContact[contactId],
+        limit: _messagePageSize,
+      );
+      final current =
+          _messagesByContact.putIfAbsent(contactId, () => <Message>[]);
+      current.insertAll(0, page.messages);
+      _loadedStartSequenceByContact[contactId] = page.startSequence;
+      _messageCountByContact[contactId] = page.totalCount;
+      _hasOlderMessagesByContact[contactId] = page.hasOlder;
+      _error = null;
+      return page.messages.isNotEmpty;
+    } catch (e) {
+      _error = '加载更早消息失败：$e';
+      return false;
+    } finally {
+      _isLoadingOlderMessages = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _refreshTimeline(String contactId) async {
+    final state = await _timelineUseCase.load(contactId);
+    _branchesByContact[contactId] = state.branches;
+    _checkpointsByContact[contactId] = state.checkpoints;
+  }
+
+  Future<void> refreshConversationTimeline() async {
+    final contactId = _selectedContactId;
+    if (contactId == null) return;
+    try {
+      await _refreshTimeline(contactId);
+      _error = null;
+    } catch (e) {
+      _error = '加载对话时间线失败：$e';
+    }
+    notifyListeners();
+  }
+
+  Future<void> _createCompletedTurnCheckpoint(
+    String contactId,
+    String sourceMessageId,
+  ) async {
+    if (!_timelineUseCase.isAvailable) return;
+    final contactIndex = _contacts.indexWhere((item) => item.id == contactId);
+    if (contactIndex < 0) return;
+    var label = '';
+    final messages = _messagesByContact[contactId] ?? const <Message>[];
+    for (final message in messages.reversed) {
+      if (message.id != sourceMessageId) continue;
+      final normalized = message.content.replaceAll(RegExp(r'\s+'), ' ').trim();
+      label = normalized.length > 32
+          ? '${normalized.substring(0, 32)}…'
+          : normalized;
+      break;
+    }
+    try {
+      await _timelineUseCase.createCheckpoint(
+        contact: _contacts[contactIndex],
+        sourceMessageId: sourceMessageId,
+        label: label,
+      );
+      await _refreshTimeline(contactId);
+    } catch (e) {
+      debugPrint('创建对话检查点失败: $e');
+      _error = '本轮消息已保存，但检查点创建失败';
+    }
+  }
+
+  Future<bool> createBranchFromCheckpoint(
+    String checkpointId, {
+    required String name,
+    bool switchToNewBranch = true,
+  }) async {
+    final contactId = _selectedContactId;
+    if (contactId == null || !_timelineUseCase.isAvailable || isLoading) {
+      return false;
+    }
+    try {
+      final branch = await _timelineUseCase.createBranch(
+        checkpointId: checkpointId,
+        name: name,
+      );
+      if (branch == null) return false;
+      if (switchToNewBranch) {
+        return switchConversationBranch(branch.id);
+      }
+      await _refreshTimeline(contactId);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = '创建分支失败：$e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<bool> switchConversationBranch(String branchId) async {
+    final contactId = _selectedContactId;
+    if (contactId == null || !_timelineUseCase.isAvailable || isLoading) {
+      return false;
+    }
+    _isLoadingOlderMessages = true;
+    notifyListeners();
+    try {
+      final snapshot = await _timelineUseCase.switchBranch(
+        contactId: contactId,
+        branchId: branchId,
+      );
+      if (snapshot == null) return false;
+      final index = _contacts.indexWhere((item) => item.id == contactId);
+      if (index >= 0) _contacts[index] = snapshot.contact;
+      final all = snapshot.messages;
+      final start =
+          all.length > _messagePageSize ? all.length - _messagePageSize : 0;
+      _messagesByContact[contactId] = List<Message>.from(all.skip(start));
+      _loadedStartSequenceByContact[contactId] = start;
+      _messageCountByContact[contactId] = all.length;
+      _hasOlderMessagesByContact[contactId] = start > 0;
+      _clearSnapshot();
+      await _refreshTimeline(contactId);
+      _error = null;
+      return true;
+    } catch (e) {
+      _error = '切换分支失败：$e';
+      return false;
+    } finally {
+      _isLoadingOlderMessages = false;
+      notifyListeners();
+    }
+  }
+
+  Future<bool> renameConversationBranch(String branchId, String name) async {
+    final contactId = _selectedContactId;
+    if (contactId == null || !_timelineUseCase.isAvailable) {
+      return false;
+    }
+    try {
+      await _timelineUseCase.renameBranch(branchId, name);
+      await _refreshTimeline(contactId);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = '重命名分支失败：$e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<bool> deleteConversationBranch(String branchId) async {
+    final contactId = _selectedContactId;
+    if (contactId == null || !_timelineUseCase.isAvailable) {
+      return false;
+    }
+    try {
+      await _timelineUseCase.deleteBranch(branchId);
+      await _refreshTimeline(contactId);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = '删除分支失败：$e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<bool> setCheckpointKey(String checkpointId, bool isKey) async {
+    final contactId = _selectedContactId;
+    if (contactId == null || !_timelineUseCase.isAvailable) {
+      return false;
+    }
+    try {
+      await _timelineUseCase.setCheckpointKey(checkpointId, isKey);
+      await _refreshTimeline(contactId);
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = '更新关键节点失败：$e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<void> _persistAll() {
+    final paginated = _persistence;
+    final contact = selectedContact;
+    if (paginated is PaginatedChatPersistence && contact != null) {
+      final paginatedStore = paginated as PaginatedChatPersistence;
+      final messages = _messagesByContact[contact.id] ?? const <Message>[];
+      _loadedStartSequenceByContact.putIfAbsent(contact.id, () => 0);
+      _messageCountByContact[contact.id] = messages.length;
+      _hasOlderMessagesByContact[contact.id] = false;
+      return paginatedStore.saveConversationTail(
+        contact: contact,
+        startSequence: 0,
+        messages: List<Message>.from(messages),
+      );
+    }
+    return _persistence.replaceSnapshot(
+      ChatSnapshot(
+        contacts: List<Contact>.from(_contacts),
+        messagesByContact: <String, List<Message>>{
+          for (final entry in _messagesByContact.entries)
+            entry.key: List<Message>.from(entry.value),
+        },
+      ),
+    );
+  }
+
+  Future<void> _persistConversation(
+    String contactId, {
+    Map<String, String> metadataUpdates = const <String, String>{},
+  }) {
+    Contact? contact;
+    for (final item in _contacts) {
+      if (item.id == contactId) {
+        contact = item;
+        break;
+      }
+    }
+    if (contact == null) return Future<void>.value();
+    final messages = List<Message>.from(
+      _messagesByContact[contactId] ?? const <Message>[],
+    );
+    final paginated = _persistence;
+    if (paginated is PaginatedChatPersistence) {
+      final paginatedStore = paginated as PaginatedChatPersistence;
+      final startSequence = _loadedStartSequenceByContact[contactId] ?? 0;
+      _messageCountByContact[contactId] = startSequence + messages.length;
+      return paginatedStore.saveConversationTail(
+        contact: contact,
+        startSequence: startSequence,
+        messages: messages,
+        metadataUpdates: metadataUpdates,
+      );
+    }
+    return _persistence.saveConversation(
+      contact: contact,
+      messages: messages,
+      metadataUpdates: metadataUpdates,
+    );
+  }
+
+  String _memoryRevisionKey(String contactId) =>
+      'memory_revision_v1_$contactId';
+
+  String _memoryLocksKey(String contactId) => 'memory_locks_v1_$contactId';
+
+  Future<String> exportBackupJson() async {
+    final snapshot = await _persistence.readSnapshot();
+    final timeline = await _timelineUseCase.exportArchive();
+    return _chatBackupCodec.encode(snapshot, timeline: timeline);
+  }
+
+  Future<bool> restoreBackupJson(String source) async {
+    try {
+      final bundle = _chatBackupCodec.decodeBundle(source);
+      final restored = bundle.snapshot;
+      final revisionContactIds = <String>{
+        ..._contacts.map((contact) => contact.id),
+        ...restored.contacts.map((contact) => contact.id),
+      };
+      await _persistence.replaceSnapshot(restored);
+      await _timelineUseCase.restoreArchive(bundle.timeline);
+      for (final contactId in revisionContactIds) {
+        await _persistence.writeMetadata(_memoryRevisionKey(contactId), '');
+      }
+      _contacts
+        ..clear()
+        ..addAll(restored.contacts);
+      _selectedContactId = _contacts.isEmpty ? null : _contacts.first.id;
+      _messagesByContact.clear();
+      _loadedStartSequenceByContact.clear();
+      _messageCountByContact.clear();
+      _hasOlderMessagesByContact.clear();
+      _branchesByContact.clear();
+      _checkpointsByContact.clear();
+      final paginated = _persistence is PaginatedChatPersistence;
+      for (final contact in restored.contacts) {
+        final all = restored.messagesByContact[contact.id] ?? const <Message>[];
+        _messageCountByContact[contact.id] = all.length;
+        if (!paginated || contact.id == _selectedContactId) {
+          final start = paginated && all.length > _messagePageSize
+              ? all.length - _messagePageSize
+              : 0;
+          _messagesByContact[contact.id] = List<Message>.from(all.skip(start));
+          _loadedStartSequenceByContact[contact.id] = start;
+          _hasOlderMessagesByContact[contact.id] = start > 0;
+        }
+      }
+      _lastMemoryRevisions.clear();
+      _tempKeywordsByContact.clear();
+      _clearSnapshot();
+      _error = null;
+      if (_selectedContactId != null) {
+        await _refreshTimeline(_selectedContactId!);
+      }
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = '恢复备份失败：$e';
+      notifyListeners();
+      return false;
+    }
   }
 
   /// 保存API配置
   ///
-  /// 同时更新内存状态和持久化存储
+  /// 同时更新内存状态和持久化存储（兼容旧的 apiKey/apiBaseUrl/apiModel 入口）
   Future<void> saveApiConfig({
     required String apiKey,
     required String baseUrl,
     required String model,
   }) async {
-    _apiKey = apiKey.trim();
-    _apiBaseUrl = baseUrl.trim().isEmpty ? 'https://api.deepseek.com' : baseUrl.trim();
-    _apiModel = model.trim().isEmpty ? 'deepseek-chat' : model.trim();
-    ApiConstants.runtimeApiKey = _apiKey;
-    ApiConstants.runtimeBaseUrl = _apiBaseUrl;
-    ApiConstants.runtimeModel = _apiModel;
-    final settings = await _agentStore.readAgentSettings();
-    settings['apiKey'] = _apiKey;
-    settings['apiBaseUrl'] = _apiBaseUrl;
-    settings['apiModel'] = _apiModel;
-    await _agentStore.saveAgentSettings(settings);
-    notifyListeners();
+    final next = _providerSettings.copyWith(
+      llm: _providerSettings.llm.copyWith(
+        apiKey: apiKey.trim(),
+        baseUrl: baseUrl.trim().isEmpty
+            ? 'https://api.deepseek.com'
+            : baseUrl.trim(),
+        model: model.trim().isEmpty ? 'deepseek-chat' : model.trim(),
+      ),
+    );
+    await saveProviderSettings(next);
   }
 
   /// 保存系统提示词
@@ -379,7 +1146,7 @@ class ChatProvider extends ChangeNotifier {
   /// - 关键词提取结果（本地提取和LLM提取）
   /// - 完整的系统Prompt
   void toggleDebugMode() {
-    isDebugMode = !isDebugMode;
+    _isDebugMode = !isDebugMode;
     notifyListeners();
   }
 
@@ -395,12 +1162,318 @@ class ChatProvider extends ChangeNotifier {
   /// 选择联系人
   ///
   /// 切换当前活跃的聊天对象
-  void selectContact(String contactId) {
+  Future<void> selectContact(String contactId) async {
     if (_selectedContactId == contactId) return;
     if (!_contacts.any((c) => c.id == contactId)) return;
     _selectedContactId = contactId;
     _clearSnapshot();
     notifyListeners();
+    if (!_messagesByContact.containsKey(contactId) &&
+        _persistence is PaginatedChatPersistence) {
+      _isLoadingOlderMessages = true;
+      notifyListeners();
+      try {
+        await _loadInitialMessagePage(contactId);
+        _error = null;
+      } catch (e) {
+        _error = '加载会话失败：$e';
+        _messagesByContact[contactId] = <Message>[];
+      } finally {
+        _isLoadingOlderMessages = false;
+        notifyListeners();
+      }
+    }
+    try {
+      await _refreshTimeline(contactId);
+    } catch (e) {
+      _error = '加载对话时间线失败：$e';
+    }
+    notifyListeners();
+  }
+
+  MemoryRevisionImpact? previewMemoryRevision(String eventNodeId) {
+    final contact = selectedContact;
+    if (contact == null) return null;
+    try {
+      return _memoryRevisionService.preview(contact.eventGraph, eventNodeId);
+    } on ArgumentError {
+      return null;
+    }
+  }
+
+  bool isMemoryLocked(String eventNodeId) {
+    final contactId = _selectedContactId;
+    return contactId != null &&
+        (_lockedMemoryNodeIds[contactId]?.contains(eventNodeId) ?? false);
+  }
+
+  Future<bool> setMemoryLocked(String eventNodeId, bool locked) async {
+    final contact = selectedContact;
+    if (contact == null || !memoryNodes.any((node) => node.id == eventNodeId)) {
+      return false;
+    }
+    final locks =
+        _lockedMemoryNodeIds.putIfAbsent(contact.id, () => <String>{});
+    locked ? locks.add(eventNodeId) : locks.remove(eventNodeId);
+    await _persistence.writeMetadata(
+      _memoryLocksKey(contact.id),
+      jsonEncode(locks.toList(growable: false)),
+    );
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> deleteMemory(String eventNodeId) async {
+    final contact = selectedContact;
+    if (contact == null || isMemoryLocked(eventNodeId)) return false;
+    final node =
+        memoryNodes.where((item) => item.id == eventNodeId).firstOrNull;
+    if (node == null) return false;
+    final graph =
+        _memoryGraphService.removeNode(contact.eventGraph, eventNodeId);
+    final updated = contact.copyWith(
+      eventGraph: graph,
+      events: EventLruBucket(
+        contact.events.items
+            .where((event) => event.description != node.event.description)
+            .toList(growable: false),
+      ),
+    );
+    final index = _contacts.indexWhere((item) => item.id == contact.id);
+    if (index < 0) return false;
+    _contacts[index] = updated;
+    await _persistConversation(contact.id);
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> reviseMemory(
+    String eventNodeId,
+    EventMemory revisedEvent,
+  ) {
+    return _applyMemoryRevision(
+      eventNodeId: eventNodeId,
+      revisedEvent: revisedEvent,
+      invalidate: false,
+    );
+  }
+
+  Future<bool> invalidateMemory(String eventNodeId) {
+    if (isMemoryLocked(eventNodeId)) return Future<bool>.value(false);
+    return _applyMemoryRevision(
+      eventNodeId: eventNodeId,
+      revisedEvent: const EventMemory(),
+      invalidate: true,
+    );
+  }
+
+  Future<bool> _applyMemoryRevision({
+    required String eventNodeId,
+    required EventMemory revisedEvent,
+    required bool invalidate,
+  }) async {
+    final contact = selectedContact;
+    if (contact == null) return false;
+    try {
+      final result = _memoryRevisionService.revise(
+        graph: contact.eventGraph,
+        eventNodeId: eventNodeId,
+        revisedEvent: revisedEvent,
+        revisionId: 'revision-${DateTime.now().microsecondsSinceEpoch}',
+        invalidate: invalidate,
+      );
+      final previousDescription = result.record.previousNode.event.description;
+      final retained = contact.events.items
+          .where((event) => event.description != previousDescription)
+          .toList(growable: false);
+      final updated = contact.copyWith(
+        eventGraph: result.graph,
+        events: EventLruBucket(
+          _dedupeEvents(<EventMemory>[
+            ...retained,
+            ..._flattenGraphEvents(result.graph),
+          ]),
+        ),
+      );
+      final index = _contacts.indexWhere((item) => item.id == contact.id);
+      if (index < 0) return false;
+      _contacts[index] = updated;
+      _lastMemoryRevisions[contact.id] = result.record;
+      await _persistConversation(
+        contact.id,
+        metadataUpdates: <String, String>{
+          _memoryRevisionKey(contact.id): jsonEncode(result.record.toJson()),
+        },
+      );
+      _error = null;
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _error = '记忆修改失败：$e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<bool> undoLastMemoryRevision() async {
+    final contact = selectedContact;
+    if (contact == null) return false;
+    final record = _lastMemoryRevisions[contact.id];
+    if (record == null) return false;
+    try {
+      final graph = _memoryRevisionService.undo(contact.eventGraph, record);
+      final retained = contact.events.items
+          .where((event) =>
+              event.description != record.previousNode.event.description)
+          .toList(growable: false);
+      final updated = contact.copyWith(
+        eventGraph: graph,
+        events: EventLruBucket(
+          _dedupeEvents(<EventMemory>[
+            ...retained,
+            ..._flattenGraphEvents(graph),
+          ]),
+        ),
+      );
+      final index = _contacts.indexWhere((item) => item.id == contact.id);
+      if (index < 0) return false;
+      _contacts[index] = updated;
+      _lastMemoryRevisions.remove(contact.id);
+      await _persistConversation(
+        contact.id,
+        metadataUpdates: <String, String>{
+          _memoryRevisionKey(contact.id): '',
+        },
+      );
+      _error = null;
+      notifyListeners();
+      return true;
+    } on StateError {
+      _error = '已有新对话，无法撤销这次记忆修改';
+      notifyListeners();
+      return false;
+    } catch (e) {
+      _error = '撤销记忆修改失败：$e';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Map<String, int> get memoryStats {
+    final contact = selectedContact;
+    if (contact == null) return <String, int>{};
+    final graph = contact.eventGraph;
+    final allNodes = <EventNode>[
+      ...graph.shortTermQueue,
+      ...graph.longTermQueue,
+      ...graph.ultraLongTermQueue,
+    ];
+    final contactId = contact.id;
+    final locks = _lockedMemoryNodeIds[contactId] ?? const <String>{};
+    return <String, int>{
+      'shortTerm': graph.shortTermQueue.length,
+      'longTerm': graph.longTermQueue.length,
+      'ultraLongTerm': graph.ultraLongTermQueue.length,
+      'edges': graph.edges.length,
+      'locked': locks.length,
+      'invalidated': allNodes.where((n) => n.invalidated).length,
+      'needsReview': allNodes.where((n) => n.needsReview).length,
+      'total': allNodes.length,
+    };
+  }
+
+  String? memorySourceMessageId(String eventNodeId) {
+    final contact = selectedContact;
+    if (contact == null) return null;
+    final node = memoryNodes.where((n) => n.id == eventNodeId).firstOrNull;
+    if (node == null) return null;
+    final source = node.event.sourceDialog;
+    if (source.isEmpty) return null;
+    const userLine = '用户：';
+    const aiLine = 'AI：';
+    final userIdx = source.indexOf(userLine);
+    final aiIdx = source.indexOf(aiLine, userIdx + 1);
+    if (userIdx < 0 || aiIdx < 0) return null;
+    final userContent = source.substring(userIdx + userLine.length, aiIdx).trim();
+    final messages = _messagesByContact[contact.id] ?? const <Message>[];
+    for (final msg in messages.reversed) {
+      if (msg.content.contains(userContent)) return msg.id;
+    }
+    return null;
+  }
+
+  /// 记忆召回调试信息
+  Map<String, dynamic> memoryRecallDebugInfo(String eventNodeId) {
+    final contact = selectedContact;
+    if (contact == null) return <String, dynamic>{};
+    final graph = contact.eventGraph;
+    final node = memoryNodes.where((n) => n.id == eventNodeId).firstOrNull;
+    if (node == null) return <String, dynamic>{};
+
+    final incidentEdges = graph.edges.values
+        .where((e) => e.fromNodeId == eventNodeId || e.toNodeId == eventNodeId)
+        .toList(growable: false);
+
+    final neighborIds = <String>{};
+    final edgeDetails = <Map<String, String>>[];
+    for (final edge in incidentEdges) {
+      final otherId = edge.fromNodeId == eventNodeId ? edge.toNodeId : edge.fromNodeId;
+      neighborIds.add(otherId);
+      edgeDetails.add(<String, String>{
+        'direction': '${edge.fromNodeId} → ${edge.toNodeId}',
+        'otherId': otherId,
+      });
+    }
+
+    final neighbors = <Map<String, String>>[];
+    for (final nid in neighborIds) {
+      final n = memoryNodes.where((n) => n.id == nid).firstOrNull;
+      if (n != null) {
+        neighbors.add(<String, String>{
+          'id': n.id,
+          'description': n.event.description.length > 80
+              ? '${n.event.description.substring(0, 80)}...'
+              : n.event.description,
+          'tier': n.tier.name,
+        });
+      }
+    }
+
+    return <String, dynamic>{
+      'nodeId': eventNodeId,
+      'description': node.event.description,
+      'tier': node.tier.name,
+      'keywords': node.event.keywords,
+      'theme': node.event.theme,
+      'createdAt': DateTime.fromMillisecondsSinceEpoch(node.createdAtMs)
+          .toIso8601String(),
+      'summarized': node.summarized,
+      'invalidated': node.invalidated,
+      'needsReview': node.needsReview,
+      'edgeCount': incidentEdges.length,
+      'edges': edgeDetails,
+      'neighbors': neighbors,
+      'belongingQueues': <String, List<String>>{
+        for (final entry in graph.belongingEventQueues.entries)
+          if (entry.value.contains(eventNodeId)) entry.key: entry.value,
+      },
+      'settingQueues': <String, List<String>>{
+        for (final entry in graph.settingEventQueues.entries)
+          if (entry.value.contains(eventNodeId)) entry.key: entry.value,
+      },
+    };
+  }
+
+  /// 更新当前联系人的世界书
+  void updateWorldBook(WorldBook book) {
+    final contact = selectedContact;
+    if (contact == null) return;
+    final updated = contact.copyWith(worldBook: book);
+    final index = _contacts.indexWhere((c) => c.id == contact.id);
+    if (index >= 0) {
+      _contacts[index] = updated;
+      notifyListeners();
+    }
   }
 
   /// 添加新联系人
@@ -421,6 +1494,7 @@ class ChatProvider extends ChangeNotifier {
     List<String> narrativeRules = const <String>[],
     List<String> otherCharacteristics = const <String>[],
     ContactCategory category = ContactCategory.contact,
+    String voice = '',
   }) async {
     final normalizedName = name.trim();
     if (normalizedName.isEmpty) return false;
@@ -452,13 +1526,16 @@ class ChatProvider extends ChangeNotifier {
           _extractLocalKeywords('$normalizedName ${fixedInput.trim()}')
               .toList(),
       category: category,
+      voice: voice,
       createdAt: DateTime.now(),
     );
     _contacts.add(contact);
     _messagesByContact.putIfAbsent(contact.id, () => <Message>[]);
+    _loadedStartSequenceByContact[contact.id] = 0;
+    _messageCountByContact[contact.id] = 0;
+    _hasOlderMessagesByContact[contact.id] = false;
     _selectedContactId = contact.id;
-    await _agentStore.saveContacts(_contacts);
-    await _agentStore.saveMessagesByContact(_messagesByContact);
+    await _persistAll();
     notifyListeners();
     return true;
   }
@@ -542,65 +1619,13 @@ class ChatProvider extends ChangeNotifier {
     String jsonString, {
     ContactCategory category = ContactCategory.contact,
   }) async {
-    try {
-      final decoded = jsonDecode(jsonString);
-      final json = _asMap(decoded);
-
-      final name = (json['name'] ?? '').toString().trim();
-      if (name.isEmpty) return false;
-
-      // 如果没有提供ID或ID为空，则自动生成
-      var id = (json['id'] ?? '').toString().trim();
-      if (id.isEmpty) {
-        id = _generateUniqueId(category);
-      }
-      // 如果提供的ID已存在，自动生成新的
-      if (_contacts.any((e) => e.id == id)) {
-        id = _generateUniqueId(category);
-      }
-
-      final fixedInputStr = (json['fixedInput'] ?? '').toString();
-      final contact = Contact(
-        id: id,
-        name: name,
-        avatar: (json['avatar'] ?? '').toString(),
-        fixedInput: fixedInputStr,
-        currentStates: _extractStringMap(json['currentStates']),
-        personality: _extractStrings(json['personality']),
-        appearance: _extractStrings(json['appearance']),
-        settings: _extractSettings(json['settings']),
-        backgroundStory: _extractStrings(json['backgroundStory']),
-        narrativeRules: _extractStrings(json['narrativeRules']),
-        otherCharacteristics: _extractStrings(json['otherCharacteristics']),
-        worldKnowledge: WorldKnowledgeBucket(
-          _extractStrings(json['worldKnowledge']),
-        ),
-        selfKnowledge: SelfKnowledgeBucket(
-          _extractStrings(json['selfKnowledge']),
-        ),
-        userKnowledge: UserKnowledgeBucket(
-          _extractStrings(json['userKnowledge']),
-        ),
-        keywordLibrary: _extractLocalKeywords('$name $fixedInputStr').toList(),
-        belongings: _extractStrings(json['belongings']),
-        status: _extractStrings(json['status']),
-        mood: (json['mood'] ?? '').toString(),
-        time: (json['time'] ?? '').toString(),
-        category: category,
-        createdAt: DateTime.now(),
-      );
-
-      _contacts.add(contact);
-      _messagesByContact.putIfAbsent(contact.id, () => <Message>[]);
-      _selectedContactId = contact.id;
-      await _agentStore.saveContacts(_contacts);
-      await _agentStore.saveMessagesByContact(_messagesByContact);
-      notifyListeners();
-      return true;
-    } catch (e) {
-      debugPrint('addContactFromJson failed: $e');
-      return false;
-    }
+    final data = _contactImportParser.parse(jsonString);
+    if (data == null) return false;
+    return _persistImportedContact(
+      data,
+      category: category,
+      useRequestedId: true,
+    );
   }
 
   /// 从 JSON 创建联系人，支持后备字段合并
@@ -615,101 +1640,54 @@ class ChatProvider extends ChangeNotifier {
     String? fallbackAvatar,
     String? fallbackFixedInput,
     Map<String, String>? fallbackCurrentStates,
+    String fallbackVoice = '',
   }) async {
-    try {
-      final decoded = jsonDecode(jsonString);
-      final json = _asMap(decoded);
+    final data = _contactImportParser.parse(
+      jsonString,
+      fallback: ContactImportFallback(
+        name: fallbackName ?? '',
+        avatar: fallbackAvatar ?? '',
+        fixedInput: fallbackFixedInput ?? '',
+        currentStates: fallbackCurrentStates ?? const <String, String>{},
+        voice: fallbackVoice,
+      ),
+    );
+    if (data == null) return false;
+    return _persistImportedContact(
+      data,
+      category: category,
+      useRequestedId: false,
+    );
+  }
 
-      debugPrint(
-          '[addContactFromJsonWithFallback] json keys: ${json.keys.toList()}');
-      debugPrint(
-          '[addContactFromJsonWithFallback] raw settings: ${json['settings']}');
-      debugPrint(
-          '[addContactFromJsonWithFallback] raw narrativeRules: ${json['narrativeRules']}');
-      debugPrint(
-          '[addContactFromJsonWithFallback] raw otherCharacteristics: ${json['otherCharacteristics']}');
-
-      // 优先使用 JSON 中的值，否则使用后备值
-      final name = ((json['name'] ?? '').toString().trim()).isNotEmpty
-          ? (json['name'] ?? '').toString().trim()
-          : fallbackName?.trim() ?? '';
-
-      if (name.isEmpty) return false;
-
-      // 自动生成唯一ID（忽略 JSON 和后备中的 id）
-      var id = _generateUniqueId(category);
-      // 确保ID唯一
-      while (_contacts.any((e) => e.id == id)) {
-        id = _generateUniqueId(category);
-      }
-
-      // 合并字段：JSON 优先，其次是后备值
-      final personality = _extractStrings(json['personality']);
-      final appearance = _extractStrings(json['appearance']);
-      final personalInfo = _extractStrings(json['personalInfo']);
-      final settings = _extractSettings(json['settings']);
-      final backgroundStory = _extractStrings(json['backgroundStory']);
-      final narrativeRules = _extractStrings(json['narrativeRules']);
-      final otherCharacteristics =
-          _extractStrings(json['otherCharacteristics']);
-
-      debugPrint('[addContactFromJsonWithFallback] settings: $settings');
-      debugPrint(
-          '[addContactFromJsonWithFallback] narrativeRules: $narrativeRules');
-      debugPrint(
-          '[addContactFromJsonWithFallback] otherCharacteristics: $otherCharacteristics');
-
-      final contact = Contact(
-        id: id,
-        name: name,
-        avatar: ((json['avatar'] ?? '').toString()).isNotEmpty
-            ? (json['avatar'] ?? '').toString()
-            : fallbackAvatar ?? '',
-        fixedInput: ((json['fixedInput'] ?? '').toString().trim()).isNotEmpty
-            ? (json['fixedInput'] ?? '').toString().trim()
-            : fallbackFixedInput ?? '',
-        currentStates: _extractStringMap(json['currentStates']).isNotEmpty
-            ? _extractStringMap(json['currentStates'])
-            : _normalizeStateMap(
-                fallbackCurrentStates ?? const <String, String>{}),
-        personality: personality,
-        appearance: appearance,
-        personalInfo: personalInfo,
-        settings: settings,
-        backgroundStory: backgroundStory,
-        narrativeRules: narrativeRules,
-        otherCharacteristics: otherCharacteristics,
-        worldKnowledge: WorldKnowledgeBucket(
-          _extractStrings(json['worldKnowledge']),
-        ),
-        selfKnowledge: SelfKnowledgeBucket(
-          _extractStrings(json['selfKnowledge']),
-        ),
-        userKnowledge: UserKnowledgeBucket(
-          _extractStrings(json['userKnowledge']),
-        ),
-        keywordLibrary: _extractLocalKeywords(
-                '$name ${((json['fixedInput'] ?? '').toString().trim()).isNotEmpty ? (json['fixedInput'] ?? '').toString().trim() : fallbackFixedInput ?? ''}')
-            .toList(),
-        belongings: _extractStrings(json['belongings']),
-        status: _extractStrings(json['status']),
-        mood: (json['mood'] ?? '').toString(),
-        time: (json['time'] ?? '').toString(),
-        category: category,
-        createdAt: DateTime.now(),
-      );
-
-      _contacts.add(contact);
-      _messagesByContact.putIfAbsent(contact.id, () => <Message>[]);
-      _selectedContactId = contact.id;
-      await _agentStore.saveContacts(_contacts);
-      await _agentStore.saveMessagesByContact(_messagesByContact);
-      notifyListeners();
-      return true;
-    } catch (e) {
-      debugPrint('addContactFromJsonWithFallback failed: $e');
-      return false;
+  Future<bool> _persistImportedContact(
+    ContactImportData data, {
+    required ContactCategory category,
+    required bool useRequestedId,
+  }) async {
+    var id = useRequestedId ? data.requestedId : '';
+    if (id.isEmpty || _contacts.any((contact) => contact.id == id)) {
+      id = _generateUniqueId(category);
     }
+    while (_contacts.any((contact) => contact.id == id)) {
+      id = _generateUniqueId(category);
+    }
+    final contact = data.toContact(
+      id: id,
+      category: category,
+      keywordLibrary:
+          _extractLocalKeywords('${data.name} ${data.fixedInput}').toList(),
+      createdAt: DateTime.now(),
+    );
+    _contacts.add(contact);
+    _messagesByContact.putIfAbsent(contact.id, () => <Message>[]);
+    _loadedStartSequenceByContact[contact.id] = 0;
+    _messageCountByContact[contact.id] = 0;
+    _hasOlderMessagesByContact[contact.id] = false;
+    _selectedContactId = contact.id;
+    await _persistAll();
+    notifyListeners();
+    return true;
   }
 
   /// 删除联系人
@@ -727,6 +1705,11 @@ class ChatProvider extends ChangeNotifier {
 
     // 删除关联的消息记录
     _messagesByContact.remove(contactId);
+    _loadedStartSequenceByContact.remove(contactId);
+    _messageCountByContact.remove(contactId);
+    _hasOlderMessagesByContact.remove(contactId);
+    _branchesByContact.remove(contactId);
+    _checkpointsByContact.remove(contactId);
 
     // 如果删除的是当前选中的联系人，更新选中状态
     if (_selectedContactId == contactId) {
@@ -737,9 +1720,15 @@ class ChatProvider extends ChangeNotifier {
       }
     }
 
-    // 持久化更新
-    await _agentStore.saveContacts(_contacts);
-    await _agentStore.saveMessagesByContact(_messagesByContact);
+    // SQLite 外键级联删除该联系人的消息与事件图。
+    await _persistence.deleteConversation(contactId);
+    final selectedId = _selectedContactId;
+    if (selectedId != null &&
+        !_messagesByContact.containsKey(selectedId) &&
+        _persistence is PaginatedChatPersistence) {
+      await _loadInitialMessagePage(selectedId);
+    }
+    if (selectedId != null) await _refreshTimeline(selectedId);
 
     notifyListeners();
     return true;
@@ -791,6 +1780,7 @@ class ChatProvider extends ChangeNotifier {
           '$systemPrompt\n\n用户描述：\n$naturalLanguage',
           contactId: 'system-nlp-to-json',
           contactName: 'System',
+          profile: _providerSettings.llm,
         );
         final jsonStr = _extractJsonFromResponse(response);
         if (jsonStr == null || jsonStr.isEmpty) return null;
@@ -856,6 +1846,7 @@ class ChatProvider extends ChangeNotifier {
         '$systemPrompt\n\n用户描述：\n$naturalLanguage',
         contactId: 'system-nlp-to-json',
         contactName: 'System',
+        profile: _providerSettings.llm,
       );
 
       // 尝试从响应中提取 JSON
@@ -925,15 +1916,15 @@ class ChatProvider extends ChangeNotifier {
   /// 7. 触发事件总结（如达到阈值）
   Future<void> sendMessage(String rawInput) async {
     // 检查API Key是否已设置
-    if (_apiKey.isEmpty) {
-      error = '请先设置 API Key';
+    if (!llmProfiles.any((profile) => profile.hasApiKey)) {
+      _error = '请先设置 API Key';
       notifyListeners();
       return;
     }
 
     final selected = selectedContact;
     if (selected == null) {
-      error = AppStrings.noContact;
+      _error = AppStrings.noContact;
       notifyListeners();
       return;
     }
@@ -941,6 +1932,9 @@ class ChatProvider extends ChangeNotifier {
     // 格式化输入
     final input = _formatter.normalize(rawInput);
     if (input.isEmpty || isLoading) return;
+
+    final generationCancellation = Completer<void>();
+    _generationCancellation = generationCancellation;
 
     // ===== 保存快照（在修改任何状态前）=====
     _saveSnapshot(selected);
@@ -956,18 +1950,20 @@ class ChatProvider extends ChangeNotifier {
     final currentList =
         _messagesByContact.putIfAbsent(selected.id, () => <Message>[]);
     currentList.add(userMessage);
-    await _agentStore.saveMessagesByContact(_messagesByContact);
+    await _persistConversation(selected.id);
 
     // 设置加载状态
-    isLoading = true;
-    isTyping = true;
-    error = null;
+    _isLoading = true;
+    _isTyping = true;
+    _generationStatus = ChatGenerationStatus.preparing;
+    _error = null;
     notifyListeners();
 
+    String? streamingMessageId;
     try {
       final currentContact = selectedContact;
       if (currentContact == null) {
-        error = AppStrings.noContact;
+        _error = AppStrings.noContact;
         notifyListeners();
         return;
       }
@@ -992,36 +1988,21 @@ class ChatProvider extends ChangeNotifier {
       );
 
       // 步骤2: 构建Prompt联系人（包含筛选后的事件和知识）
-      final promptContact = _buildPromptContact(currentContact,
-          inputKeywords: keywords.mergedKeywords);
+      final promptContext = _buildPromptContact(
+        currentContact,
+        inputKeywords: keywords.mergedKeywords,
+      );
+      final promptContact = promptContext.contact;
 
-      // 检查是否需要总结：两级级联独立判断，优先 1→2（短→长）
-      // 1→2 触发：短期队列 un-summarized ≥ summaryThreshold（默认 10）
-      // 2→3 触发：长期队列 un-summarized ≥ ultraSummaryThreshold（默认 5）
-      //          仅在 1→2 未触发时才考虑 2→3，避免同轮既压短又压长
-      // 没有 LLM 输出的 summary 字段时，零噪声（pendingSummaryEvents 为空）
-      final mustSummarizeShort =
-          _unsummarizedCount(currentContact.eventGraph, EventTier.shortTerm) >=
-              _summaryThreshold;
-      final mustSummarizeLong = !mustSummarizeShort &&
-          _unsummarizedCount(currentContact.eventGraph, EventTier.longTerm) >=
-              _ultraSummaryThreshold;
-      final needSummary = mustSummarizeShort || mustSummarizeLong;
-      // 本轮 summary 该路由到哪一层：null=无强制（由 LLM 自主输出时），
-      // 1→2 用 shortTerm，2→3 用 longTerm
-      final EventTier? summarySourceTier = mustSummarizeShort
-          ? EventTier.shortTerm
-          : (mustSummarizeLong ? EventTier.longTerm : null);
-      final pendingSummaryCap =
-          mustSummarizeShort ? _summaryThreshold : _ultraSummaryThreshold;
-      final pendingSummaryEvents = needSummary
-          ? _queueByTier(currentContact.eventGraph,
-                  mustSummarizeShort ? EventTier.shortTerm : EventTier.longTerm)
-              .where((e) => !e.summarized)
-              .take(pendingSummaryCap)
-              .map((e) => e.event)
-              .toList()
-          : <EventMemory>[];
+      // 两级级联独立判断，固定优先 1→2（短→长），避免同轮压缩两层。
+      final cascadeDecision = _memoryCascadePolicy.evaluate(
+        graph: currentContact.eventGraph,
+        shortTermThreshold: _summaryThreshold,
+        longTermThreshold: _ultraSummaryThreshold,
+      );
+      final needSummary = cascadeDecision.needsSummary;
+      final summarySourceTier = cascadeDecision.sourceTier;
+      final pendingSummaryEvents = cascadeDecision.pendingEvents;
 
       // 步骤3: 合并系统Prompt
       final systemPrompt = _mergeSystemPromptWithContact(
@@ -1055,41 +2036,113 @@ class ChatProvider extends ChangeNotifier {
             createdAt: DateTime.now(),
           ),
         );
-        await _agentStore.saveMessagesByContact(_messagesByContact);
+        await _persistConversation(selected.id);
       }
 
       // 步骤5: 发送AI请求
-      final reply = await _repository.askAi(
-        contactId: selected.id,
-        contactName: selected.name,
-        userMessage: userMessage,
-        systemPrompt: systemPrompt,
-        settings: _appSettings,
-      );
+      final Message reply;
+      if (_providerSettings.llm.parameters.stream) {
+        streamingMessageId =
+            'assistant-${DateTime.now().microsecondsSinceEpoch}';
+        final raw = StringBuffer();
+        final throttle = Stopwatch()..start();
+        await _consumeGenerationStream(
+          _streamRoleplayWithFallback(
+            contact: selected,
+            userMessage: userMessage,
+            systemPrompt: systemPrompt,
+          ),
+          (chunk) {
+            raw.write(chunk);
+            final partial =
+                StructuredOutputRegexParser.extractPartialReply(raw.toString());
+            if (partial == null || partial.isEmpty) return;
+            final index = currentList.indexWhere(
+              (message) => message.id == streamingMessageId,
+            );
+            final draft = Message(
+              id: streamingMessageId!,
+              role: MessageRole.assistant,
+              content: partial,
+              createdAt: DateTime.now(),
+              status: MessageStatus.sending,
+            );
+            if (index < 0) {
+              currentList.add(draft);
+            } else {
+              currentList[index] = draft;
+            }
+            _generationStatus = ChatGenerationStatus.streaming;
+            _isTyping = false;
+            if (throttle.elapsedMilliseconds >= 32) {
+              throttle.reset();
+              notifyListeners();
+            }
+          },
+        );
+        final rawReply = raw.toString();
+        if (rawReply.trim().isEmpty) {
+          throw const AiServiceException('模型返回了空的流式响应。');
+        }
+        reply = Message(
+          id: streamingMessageId,
+          role: MessageRole.assistant,
+          content: rawReply,
+          createdAt: DateTime.now(),
+        );
+      } else {
+        reply = await _askRoleplayWithFallback(
+          contact: selected,
+          userMessage: userMessage,
+          systemPrompt: systemPrompt,
+        );
+      }
 
       // 更新用户消息状态为已发送
       _updateMessageStatus(selected.id, userMessage.id, MessageStatus.sent);
 
       // 步骤6: 提取回复内容（从JSON中提取reply字段）
-      final replyContent =
-          StructuredOutputRegexParser.extractReply(reply.content);
+      final String? replyContent =
+          StructuredOutputRegexParser.extractReply(reply.content) ??
+              // LLM 没返回标准 JSON（直接吐纯文本）时，AiService 已把整段当 reply
+              // 返回了，但这里 extractReply 还是解析不出 reply 字段，所以再退一步：
+              // 把 AiService 给的 content 整段当作可见内容展示，至少用户能看到 LLM 说啥
+              (reply.content.trim().isEmpty ? null : reply.content.trim());
 
       // 检查是否成功提取到回复内容
       if (replyContent == null) {
+        _generationStatus = ChatGenerationStatus.failure;
         // 如果提取失败，可能是AI返回了错误消息
-        error = 'AI 回复格式错误，请稍后重试';
+        _error = 'AI 回复格式错误，请稍后重试';
+        if (isDebugMode) {
+          currentList.add(
+            Message(
+              id: 'debug-raw-${DateTime.now().microsecondsSinceEpoch}',
+              role: MessageRole.user,
+              content: '【调试信息】LLM 原生输出（格式异常，无法解析）\n${reply.content}',
+              createdAt: DateTime.now(),
+            ),
+          );
+          await _persistConversation(selected.id);
+        }
         _updateMessageStatus(selected.id, userMessage.id, MessageStatus.failed);
+        await _persistConversation(selected.id);
         return;
       }
 
-      currentList.add(
-        Message(
-          id: reply.id,
-          role: reply.role,
-          content: replyContent,
-          createdAt: reply.createdAt,
-        ),
+      final completedReply = Message(
+        id: reply.id,
+        role: reply.role,
+        content: replyContent,
+        createdAt: reply.createdAt,
       );
+      final streamedIndex =
+          currentList.indexWhere((message) => message.id == reply.id);
+      if (streamedIndex < 0) {
+        currentList.add(completedReply);
+      } else {
+        currentList[streamedIndex] = completedReply;
+      }
 
       // 调试模式：显示 LLM 原生输出
       if (isDebugMode) {
@@ -1103,34 +2156,66 @@ class ChatProvider extends ChangeNotifier {
         );
       }
 
-      await _agentStore.saveMessagesByContact(_messagesByContact);
-
       // 步骤7: 更新联系人记忆
       await _updateContactFromMemoryPatch(
         selected,
         reply.content,
         userInput: input,
         inputKeywords: keywords.mergedKeywords,
+        promptEventNodeIds: promptContext.eventNodeIds,
         summarySourceTier: summarySourceTier,
       );
+      await _createCompletedTurnCheckpoint(selected.id, reply.id);
+      _generationStatus = ChatGenerationStatus.completed;
+    } on _GenerationCancelled {
+      _error = null;
+      _generationStatus = ChatGenerationStatus.cancelled;
+      _updateMessageStatus(
+          selected.id, userMessage.id, MessageStatus.cancelled);
+      if (streamingMessageId != null) {
+        _updateMessageStatus(
+          selected.id,
+          streamingMessageId,
+          MessageStatus.cancelled,
+        );
+      }
+      await _rollbackMemoryOnFailure(selected.id);
     } on AiServiceException catch (e) {
-      error = e.userMessage;
+      _generationStatus = ChatGenerationStatus.failure;
+      _error = e.userMessage;
       _updateMessageStatus(selected.id, userMessage.id, MessageStatus.failed);
       _heartbeat.markReconnecting();
+      // 调试模式：把 LLM 原生响应附在最后一条用户消息后面，
+      // 即使抛了"格式异常"也能看到 LLM 到底吐了什么。
+      if (isDebugMode && e.rawResponse != null) {
+        final currentList = _messagesByContact[selected.id] ?? <Message>[];
+        currentList.add(
+          Message(
+            id: 'debug-raw-${DateTime.now().microsecondsSinceEpoch}',
+            role: MessageRole.user,
+            content: '【调试信息】LLM 原生输出（请求失败：${e.userMessage}）\n${e.rawResponse}',
+            createdAt: DateTime.now(),
+          ),
+        );
+      }
       // 发送失败时回退记忆状态，但保留消息列表显示
       await _rollbackMemoryOnFailure(selected.id);
     } catch (e, st) {
+      _generationStatus = ChatGenerationStatus.failure;
       debugPrint('sendMessage failed: $e');
       debugPrint('$st');
       final raw = e.toString().trim();
-      error = raw.isEmpty ? AppStrings.networkError : '请求失败：$raw';
+      _error = raw.isEmpty ? AppStrings.networkError : '请求失败：$raw';
       _updateMessageStatus(selected.id, userMessage.id, MessageStatus.failed);
       _heartbeat.markReconnecting();
       // 发送失败时回退记忆状态，但保留消息列表显示
       await _rollbackMemoryOnFailure(selected.id);
     } finally {
-      isLoading = false;
-      isTyping = false;
+      if (identical(_generationCancellation, generationCancellation)) {
+        _generationCancellation = null;
+        _isLoading = false;
+        _isTyping = false;
+      }
       notifyListeners();
     }
   }
@@ -1156,7 +2241,7 @@ class ChatProvider extends ChangeNotifier {
     final currentList = _messagesByContact[contact.id] ?? <Message>[];
 
     // 1. 转发给 opencode
-    final result = await _opencodeService.execute(input);
+    final result = await _awaitGeneration(_opencodeService.execute(input));
 
     // 2. 处理结果：成功就拿到 raw 文本，失败就显示错误
     final String rawOutput;
@@ -1180,7 +2265,9 @@ class ChatProvider extends ChangeNotifier {
     ));
 
     _updateMessageStatus(contact.id, userMessage.id, MessageStatus.sent);
-    await _agentStore.saveMessagesByContact(_messagesByContact);
+    await _persistConversation(contact.id);
+    await _createCompletedTurnCheckpoint(contact.id, currentList.last.id);
+    _generationStatus = ChatGenerationStatus.completed;
 
     // 4. 若 service 自动选了 sessionId，持久化下来
     final currentSession = _opencodeService.config.sessionId;
@@ -1190,8 +2277,8 @@ class ChatProvider extends ChangeNotifier {
           opencodeConfig.copyWith(sessionId: currentSession));
     }
 
-    isLoading = false;
-    isTyping = false;
+    _isLoading = false;
+    _isTyping = false;
     notifyListeners();
   }
 
@@ -1213,11 +2300,224 @@ class ChatProvider extends ChangeNotifier {
 
     // 移除失败的消息，避免重复
     messages.removeAt(messageIndex);
-    await _agentStore.saveMessagesByContact(_messagesByContact);
+    await _persistConversation(contactId);
     notifyListeners();
 
     // 重新发送
     await sendMessage(message.content);
+  }
+
+  Future<bool> editMessage(String messageId, String content) async {
+    final contactId = _selectedContactId;
+    final normalized = content.trim();
+    if (contactId == null || normalized.isEmpty || isLoading) return false;
+    final messages = _messagesByContact[contactId];
+    final index =
+        messages?.indexWhere((message) => message.id == messageId) ?? -1;
+    if (messages == null || index < 0) return false;
+    messages[index] = messages[index].copyWith(content: normalized);
+    await _persistConversation(contactId);
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> deleteMessage(String messageId) async {
+    final contactId = _selectedContactId;
+    if (contactId == null || isLoading) return false;
+    final messages = _messagesByContact[contactId];
+    final index =
+        messages?.indexWhere((message) => message.id == messageId) ?? -1;
+    if (messages == null || index < 0) return false;
+    messages.removeAt(index);
+    await _persistConversation(contactId);
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> generateReplyCandidate(String messageId) async {
+    final contact = selectedContact;
+    final messages = contact == null ? null : _messagesByContact[contact.id];
+    final index =
+        messages?.indexWhere((message) => message.id == messageId) ?? -1;
+    if (contact == null || messages == null || index < 0 || isLoading) {
+      return false;
+    }
+    final contextStart = index > 7 ? index - 7 : 0;
+    final context = messages
+        .sublist(contextStart, index + 1)
+        .map((message) =>
+            '${message.role == MessageRole.user ? "用户" : "AI"}：${message.content}')
+        .join('\n');
+    try {
+      final raw = await _repository.askUtility(
+        contactId: contact.id,
+        contactName: contact.name,
+        profile: _providerSettings.llm,
+        prompt: '根据以下上下文，为最后一条消息生成一个不同措辞、逻辑连贯的 AI 候选回复。'
+            '只输出候选回复正文，不要解释。\n\n$context',
+      );
+      final candidate =
+          StructuredOutputRegexParser.extractReply(raw) ?? raw.trim();
+      if (candidate.isEmpty || candidate == messages[index].content) {
+        return false;
+      }
+      messages[index] = messages[index].copyWith(
+        alternatives: <String>{
+          ...messages[index].alternatives,
+          candidate,
+        }.toList(growable: false),
+      );
+      await _persistConversation(contact.id);
+      notifyListeners();
+      return true;
+    } catch (error) {
+      _error = '生成候选回复失败：$error';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<bool> applyReplyCandidate(String messageId, String candidate) async {
+    final contactId = _selectedContactId;
+    final messages = contactId == null ? null : _messagesByContact[contactId];
+    final index =
+        messages?.indexWhere((message) => message.id == messageId) ?? -1;
+    if (contactId == null || messages == null || index < 0 || isLoading) {
+      return false;
+    }
+    final current = messages[index];
+    if (!current.alternatives.contains(candidate)) return false;
+    messages[index] = current.copyWith(
+      content: candidate,
+      alternatives: <String>{
+        ...current.alternatives.where((value) => value != candidate),
+        current.content,
+      }.toList(growable: false),
+    );
+    await _persistConversation(contactId);
+    notifyListeners();
+    return true;
+  }
+
+  Future<List<MessageSearchHit>> searchCurrentConversation(
+    String query, {
+    int limit = 50,
+  }) async {
+    final contactId = _selectedContactId;
+    final normalized = query.trim();
+    if (contactId == null || normalized.isEmpty) {
+      return const <MessageSearchHit>[];
+    }
+    final persistence = _persistence;
+    if (persistence is SearchableChatPersistence) {
+      final searchable = persistence as SearchableChatPersistence;
+      return searchable.searchMessages(
+        contactId: contactId,
+        query: normalized,
+        limit: limit,
+      );
+    }
+    final lower = normalized.toLowerCase();
+    final loaded = _messagesByContact[contactId] ?? const <Message>[];
+    return <MessageSearchHit>[
+      for (var index = loaded.length - 1; index >= 0; index--)
+        if (loaded[index].content.toLowerCase().contains(lower))
+          MessageSearchHit(message: loaded[index], sequence: index),
+    ].take(limit).toList(growable: false);
+  }
+
+  Future<List<Message>> readSearchContext(
+    MessageSearchHit hit, {
+    int radius = 2,
+  }) async {
+    final contactId = _selectedContactId;
+    final persistence = _persistence;
+    if (contactId != null && persistence is SearchableChatPersistence) {
+      final searchable = persistence as SearchableChatPersistence;
+      return searchable.readMessageContext(
+        contactId: contactId,
+        sequence: hit.sequence,
+        radius: radius,
+      );
+    }
+    return <Message>[hit.message];
+  }
+
+  /// 在指定联系人消息列表末尾追加一张图片消息
+  ///
+  /// 把"用户中文描述 + 联系人设定"翻译成结构化英文生图 prompt
+  ///
+  /// 内部会：
+  /// 1. 调一次 LLM（用当前 LLM provider）让模型扩写 prompt
+  /// 2. 解析 LLM 返回的 `{englishPrompt, negativePrompt}` JSON
+  /// 3. 解析失败时退化用用户原文（确保生图流程不会卡死）
+  ///
+  /// [contactId] 决定取哪个联系人的设定（影响 prompt 风格）；
+  /// 传 null 时不带任何联系人上下文（生图风格完全由用户原文决定）。
+  ///
+  /// [ask] 是注入的"调 LLM"函数，方便在测试里换成 mock；
+  /// 传 null 时使用 ChatProvider 内的 [AiService.ask] 默认实现。
+  Future<PolishedImagePrompt> polishImagePrompt({
+    required String userDescription,
+    String? contactId,
+    Future<String> Function(String systemPrompt, String userPrompt)? ask,
+  }) async {
+    Contact? contact;
+    if (contactId != null) {
+      for (final c in _contacts) {
+        if (c.id == contactId) {
+          contact = c;
+          break;
+        }
+      }
+    }
+
+    Future<String> defaultAsk(String sys, String user) async {
+      return _repository.aiService.ask(
+        '$sys\n\n$user',
+        contactId: 'image-prompt-polisher',
+        contactName: 'System',
+        profile: _providerSettings.llm,
+      );
+    }
+
+    return ImagePromptPolisher.instance.polish(
+      userDescription: userDescription,
+      contact: contact,
+      ask: ask ?? defaultAsk,
+    );
+  }
+
+  /// 用于"长按消息 → 生成图片"流程：调用生图服务后，把结果作为
+  /// 一条独立的 [Message]（带 imageUrl/imagePrompt）插入到消息流中，
+  /// 这样渲染层就能和原消息气泡自然地串在一起。
+  ///
+  /// - [prompt] 是"用户原始输入 + 润色后的最终 prompt"（UI 主展示用）
+  /// - [originalPrompt] 是用户最开始输入的中文原文（展开后可看到润色前后对比）
+  /// - [imageUrl] 可以为 null（占位实现下没有真实 URL），UI 会以
+  ///   "占位图 + 描述"的形式展示这张消息
+  Future<void> appendImageMessage({
+    required String contactId,
+    required String prompt,
+    String? imageUrl,
+    String? originalPrompt,
+  }) async {
+    final messages = _messagesByContact.putIfAbsent(
+      contactId,
+      () => <Message>[],
+    );
+    final message = Message(
+      id: 'image-${DateTime.now().microsecondsSinceEpoch}',
+      role: MessageRole.assistant,
+      content: prompt,
+      createdAt: DateTime.now(),
+      imageUrl: imageUrl,
+      imagePrompt: prompt,
+      originalPrompt: originalPrompt,
+    );
+    messages.add(message);
+    await _persistConversation(contactId);
+    notifyListeners();
   }
 
   /// 更新消息状态
@@ -1230,7 +2530,6 @@ class ChatProvider extends ChangeNotifier {
     if (messageIndex == -1) return;
 
     messages[messageIndex] = messages[messageIndex].copyWith(status: status);
-    _agentStore.saveMessagesByContact(_messagesByContact);
   }
 
   // ==================== 撤回功能 ====================
@@ -1287,8 +2586,7 @@ class ChatProvider extends ChangeNotifier {
     }
 
     // 3. 持久化
-    await _agentStore.saveContacts(_contacts);
-    await _agentStore.saveMessagesByContact(_messagesByContact);
+    await _persistConversation(contactId);
 
     // 4. 清空快照（只能撤回一次）
     _clearSnapshot();
@@ -1322,7 +2620,7 @@ class ChatProvider extends ChangeNotifier {
     }
 
     // 2. 持久化恢复后的 Contact 状态
-    await _agentStore.saveContacts(_contacts);
+    await _persistConversation(contactId);
 
     // 注意：不清空快照，以便用户可以重发
   }
@@ -1344,52 +2642,29 @@ class ChatProvider extends ChangeNotifier {
     String response, {
     required String userInput,
     required List<String> inputKeywords,
+    required List<String> promptEventNodeIds,
     // 本轮触发的级联方向：null=无强制（仅 LLM 自主输出时），
     // shortTerm = 1→2 级联（summary 入长期），
     // longTerm = 2→3 级联（summary 入超长期）
     EventTier? summarySourceTier,
   }) async {
     final patch = StructuredOutputRegexParser.extractMemoryPatch(response);
-    if (patch == null) return;
+    if (patch == null) {
+      await _persistConversation(contact.id);
+      return;
+    }
 
-    // 提取各类数据（使用安全提取方法，支持字段可选）
-    // 传入用户输入和 AI 回复，用于保存原始对话内容到事件中
-    final incomingEvents = _extractEventsFromPatch(
-      patch,
+    final reducedPatch = _memoryPatchReducer.reduce(
+      contact: contact,
+      patch: patch,
       userInput: userInput,
-      aiReply: response,
+      rawAiResponse: response,
     );
-    final world = _mergeUnique(
-      contact.worldKnowledge.items,
-      StructuredOutputRegexParser.extractStringList(patch, 'worldKnowledge'),
-    );
-    final self = _mergeUnique(
-      contact.selfKnowledge.items,
-      StructuredOutputRegexParser.extractStringList(patch, 'selfKnowledge'),
-    );
-    final user = _mergeUnique(
-      contact.userKnowledge.items,
-      StructuredOutputRegexParser.extractStringList(patch, 'userKnowledge'),
-    );
-    final status = _mergeUnique(
-      contact.status,
-      StructuredOutputRegexParser.extractStringList(patch, 'status'),
-    );
-    final currentStates = _mergeCurrentStates(
-      contact.currentStates,
-      StructuredOutputRegexParser.extractStringMap(patch, 'currentStates'),
-    );
-    final patchBelongings = _extractBelongingPatchItems(
-      StructuredOutputRegexParser.extractStringList(patch, 'belongings'),
-    );
+    final patchBelongings = reducedPatch.belongingChanges;
 
-    // 更新事件图
-    // 每轮清空belongingEventQueues、settingEventQueues和edges，只保留当前轮的关联
+    // 更新事件图。关联跨轮保留，队列截断后统一清理悬空关系。
     var graph = contact.eventGraph.copyWith(
       turnCount: contact.eventGraph.turnCount + 1,
-      belongingEventQueues: const <String, List<String>>{},
-      settingEventQueues: const <String, List<String>>{},
-      edges: const <String, EventEdge>{},
     );
 
     // 处理新事件
@@ -1399,9 +2674,9 @@ class ChatProvider extends ChangeNotifier {
     //          下次 LLM prompt 通过 long-term.filter(!summarized) 才能再看到）
     // eventBrief: 本次事件缩写，进入短期队列
     String? currentEventNodeId;
-    if (incomingEvents.isNotEmpty) {
-      final summaryEvent = incomingEvents.summary;
-      final briefEvent = incomingEvents.brief;
+    if (reducedPatch.events.isNotEmpty) {
+      final summaryEvent = reducedPatch.summary;
+      final briefEvent = reducedPatch.turnEvent;
 
       // 如果有 summary：按级联方向路由
       // - 1→2：summary 入 long-term（un-summarized）；源层（短期）的旧事件**只标 summarized，
@@ -1417,54 +2692,70 @@ class ChatProvider extends ChangeNotifier {
             : EventTier.ultraLongTerm;
 
         // 1) summary 自身入目标层（仅 1 个）
-        graph = _enqueueNode(
-          graph,
+        final timestamp = DateTime.now();
+        final enqueuedSummary = _memoryGraphService.enqueue(
+          graph: graph,
           tier: targetTier,
           event: summaryEvent,
-          contactId: contact.id,
+          nodeId: 'event-${timestamp.microsecondsSinceEpoch}',
+          createdAtMs: timestamp.millisecondsSinceEpoch,
+          settings: _appSettings,
         );
+        graph = enqueuedSummary.graph;
         // 2) 源层里未总结的旧事件：原地标 summarized，不迁层
         //    - prompt 用 where(!summarized) 过滤，自然不再展示这些旧事件
         //    - 源层 LRU 在超容量（maxShortQueue/maxLongQueue）时会自然清理
         //    - 不再把 N 个旧事件批量复制到目标层
-        final sourceUnsummarized = _queueByTier(graph, sourceTier)
-            .where((e) => !e.summarized)
+        final sourceUnsummarized = _memoryGraphService
+            .queueForTier(graph, sourceTier)
+            .where((e) => !e.summarized && !e.invalidated)
             .toList();
-        graph = _markNodesSummarized(
-          graph,
-          sourceTier: sourceTier,
-          sourceNodeIds: sourceUnsummarized.map((e) => e.id).toSet(),
+        graph = _memoryGraphService.linkSummarySources(
+          graph: graph,
+          summaryNodeId: enqueuedSummary.nodeId,
+          sourceNodeIds: sourceUnsummarized.map((event) => event.id),
+        );
+        graph = _memoryGraphService.markSummarized(
+          graph: graph,
+          tier: sourceTier,
+          nodeIds: sourceUnsummarized.map((e) => e.id).toSet(),
         );
       }
 
       // 将 eventBrief 加入短期队列
       if (briefEvent != null && !briefEvent.isEmpty) {
-        graph = _enqueueNode(
-          graph,
+        final timestamp = DateTime.now();
+        final enqueued = _memoryGraphService.enqueue(
+          graph: graph,
           tier: EventTier.shortTerm,
           event: briefEvent,
-          contactId: contact.id,
+          nodeId: 'event-${timestamp.microsecondsSinceEpoch}',
+          createdAtMs: timestamp.millisecondsSinceEpoch,
+          settings: _appSettings,
         );
-        currentEventNodeId = graph.shortTermQueue.isNotEmpty
-            ? graph.shortTermQueue.first.id
-            : null;
+        graph = enqueued.graph;
+        currentEventNodeId = enqueued.nodeId;
       }
     }
 
     // 对所有事件队列应用LRU排序（仅本地存储部分）
     // 各层级固定输入LLM的事件不参与LRU排序
-    graph = _applyLruToAllQueues(graph, inputKeywords: inputKeywords);
+    graph = _memoryGraphService.applyLru(
+      graph: graph,
+      inputKeywords: inputKeywords,
+      settings: _appSettings,
+    );
 
     // 更新物品关联和边关系（应用LRU排序）
-    graph = _applyBelongingQueuesAndEdges(
+    graph = _memoryGraphService.updateBelongingRelations(
       graph: graph,
       eventNodeId: currentEventNodeId,
-      patch: patchBelongings,
+      changes: patchBelongings,
       inputKeywords: inputKeywords,
     );
 
     // 更新设定关联和边关系
-    graph = _applySettingQueuesAndEdges(
+    graph = _memoryGraphService.updateSettingRelations(
       graph: graph,
       eventNodeId: currentEventNodeId,
       settings: contact.settings,
@@ -1473,12 +2764,14 @@ class ChatProvider extends ChangeNotifier {
 
     // 根据 LLM 输出的 relatedEventIds 建立边关系
     if (currentEventNodeId != null) {
-      graph = _applyLlmRelatedEdges(
+      graph = _memoryRecallService.applyRelatedEdges(
         graph: graph,
         currentEventNodeId: currentEventNodeId,
-        patch: patch,
+        promptNodeIds: promptEventNodeIds,
+        relatedEventIds: patch['relatedEventIds'],
       );
     }
+    graph = _memoryRecallService.pruneDanglingRelations(graph);
 
     // 更新联系人数据
     final idx = _contacts.indexWhere((e) => e.id == contact.id);
@@ -1489,7 +2782,7 @@ class ChatProvider extends ChangeNotifier {
       avatar: contact.avatar,
       category: contact.category,
       fixedInput: contact.fixedInput,
-      currentStates: currentStates,
+      currentStates: reducedPatch.currentStates,
       personality: contact.personality,
       appearance: contact.appearance,
       personalInfo: contact.personalInfo,
@@ -1497,9 +2790,9 @@ class ChatProvider extends ChangeNotifier {
       backgroundStory: contact.backgroundStory,
       narrativeRules: contact.narrativeRules,
       otherCharacteristics: contact.otherCharacteristics,
-      worldKnowledge: WorldKnowledgeBucket(world),
-      selfKnowledge: SelfKnowledgeBucket(self),
-      userKnowledge: UserKnowledgeBucket(user),
+      worldKnowledge: WorldKnowledgeBucket(reducedPatch.worldKnowledge),
+      selfKnowledge: SelfKnowledgeBucket(reducedPatch.selfKnowledge),
+      userKnowledge: UserKnowledgeBucket(reducedPatch.userKnowledge),
       keywordLibrary: _updateKeywordLibrary(
         existing: contact.keywordLibrary,
         newKeywords: _tempKeywordsByContact[contact.id] ?? const [],
@@ -1507,29 +2800,25 @@ class ChatProvider extends ChangeNotifier {
       ),
       themeLibrary: _updateKeywordLibrary(
         existing: contact.themeLibrary,
-        newKeywords: _extractThemeFromEvents(incomingEvents.all),
+        newKeywords: _extractThemeFromEvents(reducedPatch.events),
         maxSize: _appSettings.keywordLibrarySize,
       ),
       events: EventLruBucket(
         _dedupeEvents(<EventMemory>[
           ...contact.events.items,
-          ...incomingEvents.all,
+          ...reducedPatch.events,
           ..._flattenGraphEvents(graph),
         ]),
       ),
       eventGraph: graph,
-      belongings: _applyBelongingsQueueUpdate(
-        current: contact.belongings,
-        patch: patchBelongings,
-      ),
-      status: status,
-      mood: StructuredOutputRegexParser.extractString(patch, 'mood') ??
-          contact.mood,
-      time: StructuredOutputRegexParser.extractString(patch, 'time') ??
-          contact.time,
+      belongings: reducedPatch.belongings,
+      status: reducedPatch.status,
+      mood: reducedPatch.mood,
+      time: reducedPatch.time,
+      voice: contact.voice,
       createdAt: contact.createdAt,
     );
-    await _agentStore.saveContacts(_contacts);
+    await _persistConversation(contact.id);
   }
 
   /// 更新关键词库（LRU 策略）
@@ -1573,50 +2862,6 @@ class ChatProvider extends ChangeNotifier {
     return themes;
   }
 
-  /// 根据 LLM 输出的 relatedEventIds 建立边关系
-  ///
-  /// LLM 在输出中选择与本次事件有非常强因果关系或高度相似的往期事件编号。
-  /// 这些编号对应 Prompt 中事件记忆的 [编号]。
-  ///
-  /// 硬约束：每个当前事件最多连 2 个往期事件，避免 LLM 一味堆砌关联导致
-  /// 事件图边过密、LRU 评分被关联权重污染。
-  static const int _maxLlmRelatedEdgesPerEvent = 2;
-
-  EventGraphMemory _applyLlmRelatedEdges({
-    required EventGraphMemory graph,
-    required String currentEventNodeId,
-    required Map<String, dynamic> patch,
-  }) {
-    // 提取 relatedEventIds
-    final relatedIdsRaw = patch['relatedEventIds'];
-    if (relatedIdsRaw is! List || relatedIdsRaw.isEmpty) return graph;
-
-    // 收集所有事件节点（按 Prompt 中的顺序）
-    final allNodes = <EventNode>[
-      ...graph.shortTermQueue,
-      ...graph.longTermQueue,
-      ...graph.ultraLongTermQueue,
-    ];
-
-    var out = graph;
-    int added = 0;
-    for (final idRaw in relatedIdsRaw) {
-      if (added >= _maxLlmRelatedEdgesPerEvent) break; // 硬上限：宁缺毋滥
-      final idx = idRaw is int ? idRaw : int.tryParse(idRaw.toString());
-      if (idx == null || idx < 0 || idx >= allNodes.length) continue;
-      final targetNodeId = allNodes[idx].id;
-      if (targetNodeId == currentEventNodeId) continue;
-      // 避免重复边：当前事件已经连过 target 就不重复连
-      final existingKey = '$currentEventNodeId->$targetNodeId';
-      if (out.edges.containsKey(existingKey)) continue;
-      out = _appendEdge(out,
-          fromNodeId: currentEventNodeId, toNodeId: targetNodeId);
-      added++;
-    }
-
-    return out;
-  }
-
   // ==================== Prompt构建辅助方法 ====================
 
   /// 构建用于Prompt的联系人对象
@@ -1628,34 +2873,45 @@ class ChatProvider extends ChangeNotifier {
   /// - 关联事件：5条
   /// - 知识：各类型前5条（新增的知识优先）
   /// - 物品：前5个
-  Contact? _buildPromptContact(Contact? contact,
-      {required List<String> inputKeywords}) {
-    if (contact == null) return null;
-
+  _PromptContactContext _buildPromptContact(
+    Contact contact, {
+    required List<String> inputKeywords,
+  }) {
     // 获取各层级事件队列（已按LRU排序存储在本地）
     final shortQueue = contact.eventGraph.shortTermQueue;
     final longQueue = contact.eventGraph.longTermQueue;
     final ultraQueue = contact.eventGraph.ultraLongTermQueue;
 
     // 前N条固定输入LLM（保持时间顺序，最新的在前）
-    final llmEvents = <EventMemory>[
-      ...shortQueue
-          .where((e) => !e.summarized)
-          .take(_maxShortTermEvents)
-          .map((e) => e.event),
-      ...longQueue
-          .where((e) => !e.summarized)
-          .take(_maxLongTermEvents)
-          .map((e) => e.event),
-      ...ultraQueue.take(_maxUltraTermEvents).map((e) => e.event),
+    final promptShort = shortQueue
+        .where((node) => !node.summarized && !node.invalidated)
+        .take(_maxShortTermEvents)
+        .toList(growable: false);
+    final promptLong = longQueue
+        .where((node) => !node.summarized && !node.invalidated)
+        .take(_maxLongTermEvents)
+        .toList(growable: false);
+    final promptUltra = ultraQueue
+        .where((node) => !node.invalidated)
+        .take(_maxUltraTermEvents)
+        .toList(growable: false);
+    final numberedNodes = <EventNode>[
+      ...promptShort,
+      ...promptLong,
+      ...promptUltra,
     ];
+    final numberedNodeIds = numberedNodes.map((node) => node.id).toSet();
 
-    final related = contact.eventGraph
-        .relatedEventsForPrompt(
-          inputKeywords,
-          depth: _appSettings.searchDepth,
-        )
-        .take(_maxRelatedEvents);
+    final relatedNodes = _memoryRecallService.recallNodes(
+      contact.eventGraph,
+      inputKeywords,
+      maxResults: _maxRelatedEvents,
+      depth: _appSettings.searchDepth,
+    );
+    final related = relatedNodes
+        .where((node) => !numberedNodeIds.contains(node.id))
+        .map((node) => node.event)
+        .toList(growable: false);
 
     // 知识处理：取后N条（新增的）+ 前N条（旧的），去重后取前N条
     // 这样确保新增的知识优先输入到LLM
@@ -1672,7 +2928,7 @@ class ChatProvider extends ChangeNotifier {
       maxCount: _maxPromptListItems,
     );
 
-    return Contact(
+    final promptContact = Contact(
       id: contact.id,
       name: contact.name,
       avatar: contact.avatar,
@@ -1689,14 +2945,22 @@ class ChatProvider extends ChangeNotifier {
       worldKnowledge: WorldKnowledgeBucket(worldKnowledge),
       selfKnowledge: SelfKnowledgeBucket(selfKnowledge),
       userKnowledge: UserKnowledgeBucket(userKnowledge),
-      events: EventLruBucket(
-          _dedupeEvents(<EventMemory>[...llmEvents, ...related])),
-      eventGraph: contact.eventGraph,
+      events: EventLruBucket(_dedupeEvents(related)),
+      eventGraph: EventGraphMemory(
+        shortTermQueue: promptShort,
+        longTermQueue: promptLong,
+        ultraLongTermQueue: promptUltra,
+      ),
       belongings: _firstN(contact.belongings, _maxPromptListItems),
       status: contact.status,
       mood: contact.mood,
       time: contact.time,
       createdAt: contact.createdAt,
+    );
+    return _PromptContactContext(
+      contact: promptContact,
+      eventNodeIds:
+          numberedNodes.map((node) => node.id).toList(growable: false),
     );
   }
 
@@ -1731,215 +2995,6 @@ class ChatProvider extends ChangeNotifier {
         0, maxCount < result.length ? maxCount : result.length);
   }
 
-  /// 对所有事件队列应用LRU排序（仅用于本地存储优化）
-  ///
-  /// 各层级固定输入LLM的数量：
-  /// - 短期：前10个固定，第11个及以后LRU排序
-  /// - 长期：前5个固定，第6个及以后LRU排序
-  /// - 超长期：前2个固定，第3个及以后LRU排序
-  ///
-  /// LRU排序规则：
-  /// 1. 与当前用户输入关键词匹配的事件（权重100）
-  /// 2. 与关键词匹配事件有event-event关联的（权重50）
-  /// 3. 与关键词相关belonging有event-belonging关联的（权重30）
-  /// 4. 普通event-belonging关联的（权重10）
-  /// 5. 其他事件按时间倒序（新的在前）
-  EventGraphMemory _applyLruToAllQueues(
-    EventGraphMemory graph, {
-    required List<String> inputKeywords,
-  }) {
-    // 各层级固定输入LLM的数量
-    const shortFixed = 10;
-    const longFixed = 5;
-    const ultraFixed = 2;
-
-    var result = graph;
-
-    // 对短期队列应用LRU
-    result = _applyLruToQueue(
-      result,
-      tier: EventTier.shortTerm,
-      fixedCount: shortFixed,
-      inputKeywords: inputKeywords,
-    );
-
-    // 对长期队列应用LRU
-    result = _applyLruToQueue(
-      result,
-      tier: EventTier.longTerm,
-      fixedCount: longFixed,
-      inputKeywords: inputKeywords,
-    );
-
-    // 对超长期队列应用LRU
-    result = _applyLruToQueue(
-      result,
-      tier: EventTier.ultraLongTerm,
-      fixedCount: ultraFixed,
-      inputKeywords: inputKeywords,
-    );
-
-    return result;
-  }
-
-  /// 对指定层级的事件队列应用LRU排序
-  ///
-  /// [fixedCount] 固定输入LLM的事件数量，不参与LRU排序
-  EventGraphMemory _applyLruToQueue(
-    EventGraphMemory graph, {
-    required EventTier tier,
-    required int fixedCount,
-    required List<String> inputKeywords,
-  }) {
-    List<EventNode> getQueue() {
-      switch (tier) {
-        case EventTier.shortTerm:
-          return graph.shortTermQueue;
-        case EventTier.longTerm:
-          return graph.longTermQueue;
-        case EventTier.ultraLongTerm:
-          return graph.ultraLongTermQueue;
-      }
-    }
-
-    final queue = getQueue();
-    if (queue.length <= fixedCount) return graph; // 不足固定数量不需要LRU排序
-
-    // 前fixedCount个保持原顺序（时间倒序，最新的在前）
-    final fixedEvents = queue.take(fixedCount).toList();
-
-    // 剩余事件应用LRU排序
-    final remaining = queue.skip(fixedCount).toList();
-    final sortedRemaining = _sortEventsByLruScore(
-      remaining,
-      graph: graph,
-      inputKeywords: inputKeywords,
-    );
-
-    // 合并队列：固定部分 + LRU排序部分
-    final newQueue = <EventNode>[...fixedEvents, ...sortedRemaining];
-
-    switch (tier) {
-      case EventTier.shortTerm:
-        return graph.copyWith(shortTermQueue: newQueue);
-      case EventTier.longTerm:
-        return graph.copyWith(longTermQueue: newQueue);
-      case EventTier.ultraLongTerm:
-        return graph.copyWith(ultraLongTermQueue: newQueue);
-    }
-  }
-
-  /// 对事件列表按LRU分数排序
-  List<EventNode> _sortEventsByLruScore(
-    List<EventNode> events, {
-    required EventGraphMemory graph,
-    required List<String> inputKeywords,
-  }) {
-    if (events.isEmpty) return events;
-
-    // 使用 LLM 提取的关键词
-    final keywords = inputKeywords.map((e) => e.toLowerCase()).toSet();
-
-    // 构建节点ID到节点的映射（包含所有事件，用于查找关联）
-    final allNodes = <String, EventNode>{
-      for (final node in graph.shortTermQueue) node.id: node,
-      for (final node in graph.longTermQueue) node.id: node,
-      for (final node in graph.ultraLongTermQueue) node.id: node,
-    };
-
-    // 构建邻接表（event-event边）
-    final adjacent = <String, Set<String>>{};
-    for (final edge in graph.edges.values) {
-      if (allNodes.containsKey(edge.fromNodeId) &&
-          allNodes.containsKey(edge.toNodeId)) {
-        adjacent
-            .putIfAbsent(edge.fromNodeId, () => <String>{})
-            .add(edge.toNodeId);
-        adjacent
-            .putIfAbsent(edge.toNodeId, () => <String>{})
-            .add(edge.fromNodeId);
-      }
-    }
-
-    // 获取LRU权重设置
-    final settings = appSettings;
-
-    // 计算每个节点的LRU分数
-    final scores = <String, int>{};
-    for (final node in events) {
-      var score = 0;
-
-      // 1. 检查是否与用户输入关键词匹配（使用事件的 keywords + theme 字段）
-      final nodeKeywords =
-          node.event.keywords.map((e) => e.toLowerCase()).toSet();
-      final nodeTheme = node.event.theme.map((e) => e.toLowerCase()).toSet();
-      final nodeAll = <String>{...nodeKeywords, ...nodeTheme};
-      final keywordMatches = keywords.intersection(nodeAll).length;
-      score += keywordMatches * settings.lruKeywordMatchWeight;
-
-      // 2. 检查是否有event-event关联（与被关键词匹配的事件相连）
-      final neighbors = adjacent[node.id] ?? const <String>{};
-      for (final neighborId in neighbors) {
-        final neighbor = allNodes[neighborId];
-        if (neighbor == null) continue;
-        final neighborKeywords =
-            neighbor.event.keywords.map((e) => e.toLowerCase()).toSet();
-        final neighborTheme =
-            neighbor.event.theme.map((e) => e.toLowerCase()).toSet();
-        final neighborAll = <String>{...neighborKeywords, ...neighborTheme};
-        if (keywords.intersection(neighborAll).isNotEmpty) {
-          score += settings.lruEventEventWeight;
-          break;
-        }
-      }
-
-      // 3. 检查是否有event-belonging关联
-      for (final entry in graph.belongingEventQueues.entries) {
-        final queue = entry.value;
-        if (queue.contains(node.id)) {
-          final keyLower = entry.key.toLowerCase();
-          if (keywords
-              .any((kw) => keyLower.contains(kw) || kw.contains(keyLower))) {
-            score += settings.lruEventBelongingKeywordWeight;
-          } else {
-            score += settings.lruEventBelongingNormalWeight;
-          }
-          break;
-        }
-      }
-
-      // 4. 检查是否有event-setting关联
-      for (final entry in graph.settingEventQueues.entries) {
-        final queue = entry.value;
-        if (queue.contains(node.id)) {
-          final keyLower = entry.key.toLowerCase();
-          if (keywords
-              .any((kw) => keyLower.contains(kw) || kw.contains(keyLower))) {
-            score += settings.lruEventSettingKeywordWeight;
-          } else {
-            score += settings.lruEventSettingNormalWeight;
-          }
-          break;
-        }
-      }
-
-      scores[node.id] = score;
-    }
-
-    // 按分数降序排序，分数相同的按时间倒序（新的在前）
-    final sorted = List<EventNode>.from(events);
-    sorted.sort((a, b) {
-      final scoreA = scores[a.id] ?? 0;
-      final scoreB = scores[b.id] ?? 0;
-      if (scoreA != scoreB) {
-        return scoreB.compareTo(scoreA);
-      }
-      return b.createdAtMs.compareTo(a.createdAtMs);
-    });
-
-    return sorted;
-  }
-
   /// 提取本轮对话关键词
   ///
   /// 结合本地提取和LLM提取：
@@ -1961,27 +3016,31 @@ class ChatProvider extends ChangeNotifier {
     List<String> llm = const <String>[];
     List<String> llmTheme = const <String>[];
     try {
-      final raw = await _repository.askUtility(
+      final raw = await _awaitGeneration(_repository.askUtility(
         contactId: contactId,
         contactName: contactName,
         prompt: _buildKeywordPrompt(
             userInput, existingKeywordLibrary, existingThemeLibrary),
-      );
+      ));
       final parsed = _parseKeywordsAndThemeFromRaw(raw);
       llm = parsed.keywords;
       llmTheme = parsed.theme;
+    } on _GenerationCancelled {
+      rethrow;
     } catch (_) {
       // 解析失败，重试一次
       try {
-        final raw = await _repository.askUtility(
+        final raw = await _awaitGeneration(_repository.askUtility(
           contactId: contactId,
           contactName: contactName,
           prompt: _buildKeywordPrompt(
               userInput, existingKeywordLibrary, existingThemeLibrary),
-        );
+        ));
         final parsed = _parseKeywordsAndThemeFromRaw(raw);
         llm = parsed.keywords;
         llmTheme = parsed.theme;
+      } on _GenerationCancelled {
+        rethrow;
       } catch (_) {
         llm = const <String>[];
         llmTheme = const <String>[];
@@ -2076,438 +3135,19 @@ class ChatProvider extends ChangeNotifier {
     }
   }
 
-  // ==================== 事件图操作辅助方法 ====================
-
-  /// 应用物品队列和边关系更新（全局LRU管理）
-  ///
-  /// 当物品被标记为新增或提及时：
-  /// 1. 将当前事件ID加入物品的关联队列
-  /// 2. 对队列应用LRU排序（基于事件与当前输入的相关性）
-  /// 3. 在物品节点和事件节点之间建立边
-  ///
-  /// LRU规则：
-  /// - 与当前用户输入关键词匹配的事件排在前面
-  /// - 与关键词匹配事件有关联的排在前面
-  /// - 其他事件按时间倒序
-  EventGraphMemory _applyBelongingQueuesAndEdges({
-    required EventGraphMemory graph,
-    required String? eventNodeId,
-    required List<_BelongingPatchItem> patch,
-    required List<String> inputKeywords,
-  }) {
-    if (patch.isEmpty || eventNodeId == null || eventNodeId.isEmpty) {
-      return graph;
-    }
-
-    // 使用 LLM 提取的关键词
-    final keywords = inputKeywords.map((e) => e.toLowerCase()).toSet();
-
-    // 构建节点ID到节点的映射
-    final allNodes = <String, EventNode>{
-      for (final node in graph.shortTermQueue) node.id: node,
-      for (final node in graph.longTermQueue) node.id: node,
-      for (final node in graph.ultraLongTermQueue) node.id: node,
-    };
-
-    final queues = <String, List<String>>{
-      for (final e in graph.belongingEventQueues.entries)
-        e.key: List<String>.from(e.value),
-    };
-    var out = graph;
-
-    for (final item in patch) {
-      // 获取或创建队列
-      var queue = queues.putIfAbsent(item.name, () => <String>[]);
-
-      // 添加新事件ID
-      queue.add(eventNodeId);
-
-      // 对队列应用LRU排序
-      queue = _sortBelongingQueueByLru(
-        queue,
-        allNodes: allNodes,
-        keywords: keywords,
-      );
-
-      // 限制队列长度（保留最相关的100个）
-      if (queue.length > 100) {
-        queue = queue.sublist(0, 100);
-      }
-
-      queues[item.name] = queue;
-    }
-
-    return out.copyWith(belongingEventQueues: queues);
-  }
-
-  /// 对belonging队列应用LRU排序
-  ///
-  /// 排序规则：
-  /// 1. 与关键词匹配的事件（权重100）
-  /// 2. 其他事件按时间倒序（新的在前）
-  List<String> _sortBelongingQueueByLru(
-    List<String> queue, {
-    required Map<String, EventNode> allNodes,
-    required Set<String> keywords,
-  }) {
-    if (queue.isEmpty || keywords.isEmpty) return queue;
-
-    // 计算每个事件ID的LRU分数
-    final scores = <String, int>{};
-
-    for (final eventId in queue) {
-      final node = allNodes[eventId];
-      if (node == null) {
-        scores[eventId] = 0;
-        continue;
-      }
-
-      var score = 0;
-
-      // 检查是否与用户输入关键词匹配（使用事件的 keywords + theme 字段）
-      final nodeKeywords =
-          node.event.keywords.map((e) => e.toLowerCase()).toSet();
-      final nodeTheme = node.event.theme.map((e) => e.toLowerCase()).toSet();
-      final nodeAll = <String>{...nodeKeywords, ...nodeTheme};
-      final keywordMatches = keywords.intersection(nodeAll).length;
-      score += keywordMatches * 100;
-
-      // 加上时间戳作为次要排序依据（新的在前）
-      score += (node.createdAtMs ~/ 1000000);
-
-      scores[eventId] = score;
-    }
-
-    // 按分数降序排序
-    final sorted = List<String>.from(queue);
-    sorted.sort((a, b) {
-      final scoreA = scores[a] ?? 0;
-      final scoreB = scores[b] ?? 0;
-      return scoreB.compareTo(scoreA);
-    });
-
-    return sorted;
-  }
-
-  /// 应用设定关联队列和边关系（全局LRU管理）
-  ///
-  /// 根据用户输入中的关键词，匹配 contact.settings 中的设定，
-  /// 建立 setting-event 关联，并对队列应用LRU排序
-  ///
-  /// LRU规则：
-  /// - 与当前用户输入关键词匹配的事件排在前面
-  /// - 其他事件按时间倒序（新的在前）
-  EventGraphMemory _applySettingQueuesAndEdges({
-    required EventGraphMemory graph,
-    required String? eventNodeId,
-    required List<Map<String, dynamic>> settings,
-    required List<String> inputKeywords,
-  }) {
-    if (eventNodeId == null ||
-        eventNodeId.isEmpty ||
-        settings.isEmpty ||
-        inputKeywords.isEmpty) {
-      return graph;
-    }
-
-    // 使用 LLM 提取的关键词
-    final keywords = inputKeywords.map((e) => e.toLowerCase()).toSet();
-
-    // 构建节点ID到节点的映射
-    final allNodes = <String, EventNode>{
-      for (final node in graph.shortTermQueue) node.id: node,
-      for (final node in graph.longTermQueue) node.id: node,
-      for (final node in graph.ultraLongTermQueue) node.id: node,
-    };
-
-    final queues = <String, List<String>>{
-      for (final e in graph.settingEventQueues.entries)
-        e.key: List<String>.from(e.value),
-    };
-    var out = graph;
-
-    for (final setting in settings) {
-      final key = (setting['key'] as String? ?? '').trim();
-      final value = (setting['value'] as String? ?? '').trim();
-      final relate = (setting['relate'] as List<dynamic>?)
-              ?.map((e) => e.toString())
-              .toList() ??
-          <String>[];
-
-      if (key.isEmpty) continue;
-
-      // 构建可搜索文本：key + value + relate
-      final searchableText = '$key $value ${relate.join(' ')}';
-      final settingKeywords =
-          searchableText.toLowerCase().split(RegExp(r'\s+')).toSet();
-
-      // 检查是否有关键词匹配
-      if (keywords.intersection(settingKeywords).isNotEmpty) {
-        // 获取或创建队列
-        var queue = queues.putIfAbsent(key, () => <String>[]);
-
-        // 添加新事件ID
-        queue.add(eventNodeId);
-
-        // 对队列应用LRU排序
-        queue = _sortBelongingQueueByLru(
-          queue,
-          allNodes: allNodes,
-          keywords: keywords,
-        );
-
-        // 限制队列长度（保留最相关的100个）
-        if (queue.length > 100) {
-          queue = queue.sublist(0, 100);
-        }
-
-        queues[key] = queue;
-      }
-    }
-
-    return out.copyWith(settingEventQueues: queues);
-  }
-
-  /// 将事件节点加入指定层级队列
-  ///
-  /// 创建新节点并：
-  /// 1. 添加到队列头部（最新的在前）
-  /// 2. 限制队列长度（超长事件会被删除）
-  /// 3. 与前一个节点建立边关系（时间顺序）
-  /// 4. 同步删除被截断事件的向量数据
-  EventGraphMemory _enqueueNode(
-    EventGraphMemory graph, {
-    required EventTier tier,
-    required EventMemory event,
-    String? contactId,
-  }) {
-    if (event.isEmpty) return graph;
-    // 创建新节点
-    final node = EventNode(
-      id: '${tier.storageKey}-${DateTime.now().microsecondsSinceEpoch}-${event.toPromptLine().hashCode.abs()}',
-      tier: tier,
-      event: event,
-      createdAtMs: DateTime.now().millisecondsSinceEpoch,
-      summarized: false,
-    );
-    switch (tier) {
-      case EventTier.shortTerm:
-        final newQueue = <EventNode>[node, ...graph.shortTermQueue];
-        // 找出被截断的事件并删除对应的向量数据
-        _deleteTruncatedEventsFromVectorMemory(
-          newQueue,
-          _maxShortQueue,
-          contactId,
-        );
-        var out = graph.copyWith(
-          shortTermQueue: newQueue.take(_maxShortQueue).toList(),
-        );
-        return out;
-      case EventTier.longTerm:
-        final newQueue = <EventNode>[node, ...graph.longTermQueue];
-        // 找出被截断的事件并删除对应的向量数据
-        _deleteTruncatedEventsFromVectorMemory(
-          newQueue,
-          _maxLongQueue,
-          contactId,
-        );
-        var out = graph.copyWith(
-          longTermQueue: newQueue.take(_maxLongQueue).toList(),
-        );
-        return out;
-      case EventTier.ultraLongTerm:
-        final newQueue = <EventNode>[node, ...graph.ultraLongTermQueue];
-        // 找出被截断的事件并删除对应的向量数据
-        _deleteTruncatedEventsFromVectorMemory(
-          newQueue,
-          _maxUltraQueue,
-          contactId,
-        );
-        var out = graph.copyWith(
-          ultraLongTermQueue: newQueue.take(_maxUltraQueue).toList(),
-        );
-        return out;
-    }
-  }
-
-  /// 删除被截断事件的向量数据
-  ///
-  /// [newQueue] 新的事件队列（截断前）
-  /// [maxSize] 队列最大长度
-  /// [contactId] 当前联系人ID
-  void _deleteTruncatedEventsFromVectorMemory(
-    List<EventNode> newQueue,
-    int maxSize,
-    String? contactId,
-  ) {
-    if (contactId == null || newQueue.length <= maxSize) return;
-
-    // 获取被截断的事件（超出 maxSize 的部分）
-    final truncatedEvents = newQueue.skip(maxSize).toList();
-  }
-
-  /// 添加边关系到事件图
-  ///
-  /// 使用唯一键去重，避免重复边
-  EventGraphMemory _appendEdge(
-    EventGraphMemory graph, {
-    required String fromNodeId,
-    required String toNodeId,
-  }) {
-    if (fromNodeId.trim().isEmpty || toNodeId.trim().isEmpty) return graph;
-    final edge = EventEdge(fromNodeId: fromNodeId, toNodeId: toNodeId);
-    final edgeMap = <String, EventEdge>{
-      ...graph.edges,
-      edge.toUniqueKey(): edge,
-    };
-    return graph.copyWith(edges: edgeMap);
-  }
-
-  /// 标记节点为已总结
-  ///
-  /// 在事件总结后，将被合并的原始节点标记为summarized=true
-  EventGraphMemory _markNodesSummarized(
-    EventGraphMemory graph, {
-    required EventTier sourceTier,
-    required Set<String> sourceNodeIds,
-  }) {
-    if (sourceNodeIds.isEmpty) return graph;
-    List<EventNode> mark(List<EventNode> queue) => queue
-        .map(
-          (n) => sourceNodeIds.contains(n.id)
-              ? EventNode(
-                  id: n.id,
-                  tier: n.tier,
-                  event: n.event,
-                  createdAtMs: n.createdAtMs,
-                  summarized: true,
-                )
-              : n,
-        )
-        .toList();
-    switch (sourceTier) {
-      case EventTier.shortTerm:
-        return graph.copyWith(shortTermQueue: mark(graph.shortTermQueue));
-      case EventTier.longTerm:
-        return graph.copyWith(longTermQueue: mark(graph.longTermQueue));
-      case EventTier.ultraLongTerm:
-        return graph;
-    }
-  }
-
-  /// 获取指定层级的未总结事件数量
-  int _unsummarizedCount(EventGraphMemory graph, EventTier tier) =>
-      _queueByTier(graph, tier).where((n) => !n.summarized).length;
-
-  /// 获取指定层级的事件队列
-  List<EventNode> _queueByTier(EventGraphMemory graph, EventTier tier) {
-    switch (tier) {
-      case EventTier.shortTerm:
-        return graph.shortTermQueue;
-      case EventTier.longTerm:
-        return graph.longTermQueue;
-      case EventTier.ultraLongTerm:
-        return graph.ultraLongTermQueue;
-    }
-  }
-
   /// 扁平化事件图，获取所有事件
   List<EventMemory> _flattenGraphEvents(EventGraphMemory graph) =>
       <EventMemory>[
-        ...graph.shortTermQueue.map((e) => e.event),
-        ...graph.longTermQueue.map((e) => e.event),
-        ...graph.ultraLongTermQueue.map((e) => e.event),
+        ...graph.shortTermQueue
+            .where((e) => !e.invalidated)
+            .map((e) => e.event),
+        ...graph.longTermQueue.where((e) => !e.invalidated).map((e) => e.event),
+        ...graph.ultraLongTermQueue
+            .where((e) => !e.invalidated)
+            .map((e) => e.event),
       ];
 
   // ==================== 数据提取辅助方法 ====================
-
-  /// 从 memoryPatch 中提取事件列表
-  ///
-  /// [userInput] 用户输入内容
-  /// [aiReply] AI 回复内容（原始 JSON 响应）
-  /// 提取的事件会包含 sourceDialog 字段，记录原始对话内容
-  ///
-  /// 返回记忆事件：summary 和 eventBrief。
-  /// 顶层 reply 是给用户的回复；故事模式下 reply 同时就是详细续写，
-  /// 不再从 memoryPatch 读取单独的详细事件字段。
-  _ExtractedPatchEvents _extractEventsFromPatch(
-    Map<String, dynamic>? patch, {
-    String userInput = '',
-    String aiReply = '',
-  }) {
-    if (patch == null) return const _ExtractedPatchEvents();
-
-    // 构建原始对话内容
-    final sourceDialog = _buildSourceDialog(userInput, aiReply);
-
-    EventMemory? summaryEvent;
-    EventMemory? briefEvent;
-
-    // 提取 summary（往期事件总结）
-    final summaryRaw = patch['summary'];
-    if (summaryRaw is Map<String, dynamic>) {
-      final summary = EventMemory.fromJson(summaryRaw);
-      if (!summary.isEmpty) {
-        summaryEvent = EventMemory(
-          description: summary.description,
-          keywords: summary.keywords,
-          theme: summary.theme,
-          sourceDialog: sourceDialog,
-        );
-      }
-    }
-
-    // 提取 eventBrief（本次事件缩写）
-    final briefRaw = patch['eventBrief'];
-    if (briefRaw is Map<String, dynamic>) {
-      final brief = EventMemory.fromJson(briefRaw);
-      if (!brief.isEmpty) {
-        briefEvent = EventMemory(
-          description: brief.description,
-          keywords: brief.keywords,
-          theme: brief.theme,
-          sourceDialog: sourceDialog,
-        );
-      }
-    }
-
-    return _ExtractedPatchEvents(
-      summary: summaryEvent,
-      brief: briefEvent,
-    );
-  }
-
-  /// 构建原始对话内容字符串
-  String _buildSourceDialog(String userInput, String aiReply) {
-    final buffer = StringBuffer();
-    if (userInput.trim().isNotEmpty) {
-      buffer.writeln('用户：$userInput');
-    }
-    if (aiReply.trim().isNotEmpty) {
-      // 尝试提取 AI 回复中的 reply 字段内容
-      final replyContent =
-          StructuredOutputRegexParser.extractReply(aiReply) ?? aiReply;
-      buffer.writeln('AI：$replyContent');
-    }
-    return buffer.toString().trim();
-  }
-
-  /// 从JSON中提取字符串列表
-  List<String> _extractStrings(dynamic value) {
-    if (value is! List) return const <String>[];
-    return value
-        .map((e) => e?.toString().trim() ?? '')
-        .where((e) => e.isNotEmpty)
-        .toList();
-  }
-
-  Map<String, String> _extractStringMap(dynamic value) {
-    if (value is! Map) return const <String, String>{};
-    return _normalizeStateMap(
-      value.map(
-          (key, value) => MapEntry(key.toString(), value?.toString() ?? '')),
-    );
-  }
 
   Map<String, String> _normalizeStateMap(Map<String, String> value) {
     final out = <String, String>{};
@@ -2517,48 +3157,6 @@ class ChatProvider extends ChangeNotifier {
       out[key] = entry.value.trim();
     }
     return out;
-  }
-
-  Map<String, String> _mergeCurrentStates(
-    Map<String, String> current,
-    Map<String, String> patch,
-  ) {
-    final out = Map<String, String>.from(current);
-    for (final entry in patch.entries) {
-      final key = entry.key.trim();
-      if (key.isEmpty || !out.containsKey(key)) continue;
-      out[key] = entry.value.trim();
-    }
-    return out;
-  }
-
-  List<Map<String, dynamic>> _extractSettings(dynamic value) {
-    if (value is! List) return const <Map<String, dynamic>>[];
-    final out = <Map<String, dynamic>>[];
-    for (final item in value) {
-      if (item is! Map) continue;
-      final map = _asMap(item);
-      final key = (map['key'] ?? '').toString().trim();
-      final settingValue = (map['value'] ?? '').toString().trim();
-      if (key.isEmpty || settingValue.isEmpty) continue;
-      final relate = _extractStrings(map['relate']);
-      out.add({
-        'key': key,
-        'value': settingValue,
-        'relate': relate,
-      });
-    }
-    return out;
-  }
-
-  Map<String, dynamic> _asMap(dynamic value) {
-    if (value is Map<String, dynamic>) return value;
-    if (value is Map) {
-      return value.map(
-        (key, value) => MapEntry(key.toString(), value),
-      );
-    }
-    return const <String, dynamic>{};
   }
 
   /// 合并两个列表并去重
@@ -2581,47 +3179,6 @@ class ChatProvider extends ChangeNotifier {
       final key = e.toPromptLine().trim();
       if (key.isEmpty || !seen.add(key)) continue;
       out.add(e);
-    }
-    return out;
-  }
-
-  /// 从字符串列表中提取物品补丁项
-  ///
-  /// 解析格式：(新增)物品名 或 (提及)物品名
-  List<_BelongingPatchItem> _extractBelongingPatchItems(List<String> items) {
-    final out = <_BelongingPatchItem>[];
-    final reg = RegExp(r'^[\(\（]\s*(新增|提及)\s*[\)\）]\s*(.+)$');
-    for (final text in items) {
-      final m = reg.firstMatch(text);
-      if (m == null) continue;
-      final tag = m.group(1)?.trim() ?? '';
-      final name = m.group(2)?.trim() ?? '';
-      if (name.isEmpty) continue;
-      out.add(
-        _BelongingPatchItem(
-          type: tag == '新增'
-              ? _BelongingPatchType.added
-              : _BelongingPatchType.mentioned,
-          name: name,
-        ),
-      );
-    }
-    return out;
-  }
-
-  /// 应用物品队列更新
-  ///
-  /// 将新增或提及的物品移到队列末尾（表示最近使用）
-  List<String> _applyBelongingsQueueUpdate({
-    required List<String> current,
-    required List<_BelongingPatchItem> patch,
-  }) {
-    if (patch.isEmpty) return List<String>.from(current);
-    final out = <String>[...current];
-    for (final item in patch) {
-      final idx = out.indexWhere((e) => e == item.name);
-      if (idx >= 0) out.removeAt(idx);
-      out.add(item.name);
     }
     return out;
   }
@@ -2667,27 +3224,25 @@ class ChatProvider extends ChangeNotifier {
   @override
   void dispose() {
     _heartbeat.stop();
+    _persistence.close();
     super.dispose();
   }
 }
 
 // ==================== 内部数据类 ====================
 
-class _ExtractedPatchEvents {
-  const _ExtractedPatchEvents({
-    this.summary,
-    this.brief,
+class _GenerationCancelled implements Exception {
+  const _GenerationCancelled();
+}
+
+class _PromptContactContext {
+  const _PromptContactContext({
+    required this.contact,
+    required this.eventNodeIds,
   });
 
-  final EventMemory? summary;
-  final EventMemory? brief;
-
-  bool get isNotEmpty => summary != null || brief != null;
-
-  List<EventMemory> get all => <EventMemory>[
-        if (summary != null) summary!,
-        if (brief != null) brief!,
-      ];
+  final Contact contact;
+  final List<String> eventNodeIds;
 }
 
 /// 关键词提取结果
@@ -2721,21 +3276,4 @@ class _KeywordAndTheme {
 
   final List<String> keywords;
   final List<String> theme;
-}
-
-/// 物品补丁类型
-enum _BelongingPatchType { added, mentioned }
-
-/// 物品补丁项
-class _BelongingPatchItem {
-  const _BelongingPatchItem({
-    required this.type,
-    required this.name,
-  });
-
-  /// 补丁类型（新增或提及）
-  final _BelongingPatchType type;
-
-  /// 物品名称
-  final String name;
 }

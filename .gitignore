@@ -88,6 +88,10 @@ apk_temp_extract/
 .trae-todelete.txt
 .trae-*
 
+# AI agent / CI
+AGENTS.md
+.github/
+
 # Dart
 .dart_tool/
 
@@ -96,6 +100,8 @@ android/build/
 android/app/build/
 android/.gradle/
 android/.kotlin/errors/
+**/hs_err_pid*.log
+**/replay_pid*.log
 
 # iOS
 ios/Pods/
