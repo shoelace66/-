@@ -1,0 +1,179 @@
+{
+  "v": 1,
+  "name": "event-recall-roleplay-offline-v1",
+  "description": "低成本事件召回的确定性离线标注集；每条样例使用隔离事件图，expectedNodeIds 是 Recall@5 金标。",
+  "releaseThresholds": {
+    "minimumSampleCount": 60,
+    "minimumExplicitStructuredRecallAt5": 1.0,
+    "minimumOverallRecallAt5": 0.9375,
+    "maximumAverageExtraPosts": 0.5,
+    "maximumSecondCallRate": 0.15
+  },
+  "baseline": {
+    "name": "coordinator-before-hot-graph-continuity-fix",
+    "overallRecallAt5": 0.9375,
+    "note": "冻结基线预计仅遗漏 4 条近期热锚点到冷图邻居样例；修复后应达到 1.0。"
+  },
+  "groups": [
+    {
+      "scenario": "keyword_l0",
+      "category": "keyword",
+      "expectedPosts": 0,
+      "explicitStructured": true,
+      "samples": [
+        {"id": "kw-01", "term": "月纹徽章", "current": "她把月纹徽章别回我的斗篷上。", "expectedNodeIds": ["kw-01-target"]},
+        {"id": "kw-02", "term": "赤羽披风", "current": "赤羽披风还留在北塔吗？", "expectedNodeIds": ["kw-02-target"]},
+        {"id": "kw-03", "term": "澄海航图", "current": "我们重新展开澄海航图寻找暗礁。", "expectedNodeIds": ["kw-03-target"]},
+        {"id": "kw-04", "term": "暮钟信笺", "current": "暮钟信笺上的墨迹已经褪色。", "expectedNodeIds": ["kw-04-target"]},
+        {"id": "kw-05", "term": "白鹿坠饰", "current": "你还记得白鹿坠饰是谁送的吗？", "expectedNodeIds": ["kw-05-target"]},
+        {"id": "kw-06", "term": "星砂药瓶", "current": "星砂药瓶只剩最后一滴了。", "expectedNodeIds": ["kw-06-target"]},
+        {"id": "kw-07", "term": "霜狼短剑", "current": "霜狼短剑在月光下发出冷光。", "expectedNodeIds": ["kw-07-target"]},
+        {"id": "kw-08", "term": "青藤戒指", "current": "青藤戒指为什么会出现在这里？", "expectedNodeIds": ["kw-08-target"]},
+        {"id": "kw-09", "term": "黑曜面具", "current": "舞会上戴黑曜面具的人又出现了。", "expectedNodeIds": ["kw-09-target"]},
+        {"id": "kw-10", "term": "晨曦怀表", "current": "晨曦怀表停在我们分别的那一刻。", "expectedNodeIds": ["kw-10-target"]},
+        {"id": "kw-11", "term": "琥珀羽毛", "current": "窗台上落着那根琥珀羽毛。", "expectedNodeIds": ["kw-11-target"]},
+        {"id": "kw-12", "term": "银杏书签", "current": "银杏书签夹在她没读完的那一页。", "expectedNodeIds": ["kw-12-target"]},
+        {"id": "kw-13", "term": "铜雀铃铛", "current": "风一吹，铜雀铃铛就响了。", "expectedNodeIds": ["kw-13-target"]},
+        {"id": "kw-14", "term": "蓝焰灯盏", "current": "蓝焰灯盏照出了墙后的门。", "expectedNodeIds": ["kw-14-target"]},
+        {"id": "kw-15", "term": "红莲发簪", "current": "红莲发簪是她留给我的唯一东西。", "expectedNodeIds": ["kw-15-target"]},
+        {"id": "kw-16", "term": "灰塔通行证", "current": "守卫检查了灰塔通行证才肯放行。", "expectedNodeIds": ["kw-16-target"]},
+        {"id": "kw-17", "term": "紫晶耳坠", "current": "紫晶耳坠在烛火下闪了一下。", "expectedNodeIds": ["kw-17-target"]},
+        {"id": "kw-18", "term": "风暴号船票", "current": "我把风暴号船票推到她面前。", "expectedNodeIds": ["kw-18-target"]},
+        {"id": "kw-19", "term": "雪松木盒", "current": "雪松木盒里藏着第二封遗书。", "expectedNodeIds": ["kw-19-target"]},
+        {"id": "kw-20", "term": "深渊圣杯", "current": "深渊圣杯不能再落到祭司手里。", "expectedNodeIds": ["kw-20-target"]}
+      ]
+    },
+    {
+      "scenario": "relation_belonging_l0",
+      "category": "relation",
+      "expectedPosts": 0,
+      "explicitStructured": true,
+      "samples": [
+        {"id": "rel-b-01", "term": "王室密令", "current": "王室密令究竟交给了谁？", "expectedNodeIds": ["rel-b-01-target"]},
+        {"id": "rel-b-02", "term": "猎鹰团徽", "current": "猎鹰团徽现在属于那个少年。", "expectedNodeIds": ["rel-b-02-target"]},
+        {"id": "rel-b-03", "term": "白桦林营地", "current": "白桦林营地由她负责守夜。", "expectedNodeIds": ["rel-b-03-target"]},
+        {"id": "rel-b-04", "term": "海神祭坛", "current": "海神祭坛仍归潮汐祭司看守。", "expectedNodeIds": ["rel-b-04-target"]},
+        {"id": "rel-b-05", "term": "影卫暗号", "current": "影卫暗号只传给了三个人。", "expectedNodeIds": ["rel-b-05-target"]},
+        {"id": "rel-b-06", "term": "玫瑰庭院", "current": "玫瑰庭院已经归还给旧主人。", "expectedNodeIds": ["rel-b-06-target"]}
+      ]
+    },
+    {
+      "scenario": "relation_setting_l0",
+      "category": "relation",
+      "expectedPosts": 0,
+      "explicitStructured": true,
+      "samples": [
+        {"id": "rel-s-01", "term": "北塔藏书室", "current": "北塔藏书室的暗门还开着吗？", "expectedNodeIds": ["rel-s-01-target"]},
+        {"id": "rel-s-02", "term": "雾港十三号仓库", "current": "他们约在雾港十三号仓库碰面。", "expectedNodeIds": ["rel-s-02-target"]},
+        {"id": "rel-s-03", "term": "冬宫侧门", "current": "从冬宫侧门可以避开巡逻。", "expectedNodeIds": ["rel-s-03-target"]},
+        {"id": "rel-s-04", "term": "旧城区钟楼", "current": "旧城区钟楼午夜会敲十三下。", "expectedNodeIds": ["rel-s-04-target"]},
+        {"id": "rel-s-05", "term": "月神礼拜堂", "current": "月神礼拜堂的地下室封了多年。", "expectedNodeIds": ["rel-s-05-target"]},
+        {"id": "rel-s-06", "term": "南境驿站", "current": "南境驿站是他们最后出现的地方。", "expectedNodeIds": ["rel-s-06-target"]}
+      ]
+    },
+    {
+      "scenario": "graph_l0",
+      "category": "graph",
+      "expectedPosts": 0,
+      "explicitStructured": true,
+      "samples": [
+        {"id": "graph-01", "term": "月蚀预言", "current": "月蚀预言提到的幸存者是谁？", "expectedNodeIds": ["graph-01-target"]},
+        {"id": "graph-02", "term": "金羽罗盘", "current": "金羽罗盘曾把我们带向哪座岛？", "expectedNodeIds": ["graph-02-target"]},
+        {"id": "graph-03", "term": "断弦竖琴", "current": "断弦竖琴背后的旧事让我不安。", "expectedNodeIds": ["graph-03-target"]},
+        {"id": "graph-04", "term": "苍蓝誓言", "current": "苍蓝誓言真正约束了谁？", "expectedNodeIds": ["graph-04-target"]},
+        {"id": "graph-05", "term": "第七码头", "current": "第七码头那晚还有别的目击者吗？", "expectedNodeIds": ["graph-05-target"]},
+        {"id": "graph-06", "term": "镜湖碎片", "current": "镜湖碎片为何会映出她的脸？", "expectedNodeIds": ["graph-06-target"]},
+        {"id": "graph-07", "term": "沙海驼铃", "current": "沙海驼铃让我想起那次失踪。", "expectedNodeIds": ["graph-07-target"]},
+        {"id": "graph-08", "term": "王冠裂痕", "current": "王冠裂痕和政变之间有什么联系？", "expectedNodeIds": ["graph-08-target"]}
+      ]
+    },
+    {
+      "scenario": "negative_single_cjk",
+      "category": "negative",
+      "expectedPosts": 0,
+      "explicitStructured": false,
+      "samples": [
+        {"id": "neg-cjk-01", "term": "林", "current": "森林深处传来脚步声。", "expectedNodeIds": []},
+        {"id": "neg-cjk-02", "term": "雪", "current": "雪山的风越来越大。", "expectedNodeIds": []},
+        {"id": "neg-cjk-03", "term": "夜", "current": "午夜的钟声惊醒了守卫。", "expectedNodeIds": []},
+        {"id": "neg-cjk-04", "term": "光", "current": "月光落在空荡的王座上。", "expectedNodeIds": []}
+      ]
+    },
+    {
+      "scenario": "negative_latin_boundary",
+      "category": "negative",
+      "expectedPosts": 0,
+      "explicitStructured": false,
+      "samples": [
+        {"id": "neg-latin-01", "term": "rain", "current": "The guards resumed training before dawn.", "expectedNodeIds": []},
+        {"id": "neg-latin-02", "term": "ash", "current": "A flashback struck her at the gate.", "expectedNodeIds": []},
+        {"id": "neg-latin-03", "term": "art", "current": "The winter party ended in silence.", "expectedNodeIds": []},
+        {"id": "neg-latin-04", "term": "red", "current": "They shared the final ration.", "expectedNodeIds": []}
+      ]
+    },
+    {
+      "scenario": "continuity_keyword",
+      "category": "continuity",
+      "expectedPosts": 1,
+      "explicitStructured": false,
+      "samples": [
+        {"id": "cont-kw-01", "term": "绯月公主", "current": "她后来真的回来了吗？", "recent": [{"role": "assistant", "content": "绯月公主独自离开了王都。"}], "expectedNodeIds": ["cont-kw-01-target"]},
+        {"id": "cont-kw-02", "term": "沉默骑士", "current": "那个人最后选择了什么？", "recent": [{"role": "user", "content": "沉默骑士拒绝接受封赏。"}], "expectedNodeIds": ["cont-kw-02-target"]},
+        {"id": "cont-kw-03", "term": "白鸽信使", "current": "他为什么没有按时出现？", "recent": [{"role": "assistant", "content": "白鸽信使本该在黄昏抵达。"}], "expectedNodeIds": ["cont-kw-03-target"]},
+        {"id": "cont-kw-04", "term": "流浪医师", "current": "之后还有人见过她吗？", "recent": [{"role": "assistant", "content": "流浪医师治好了村里的疫病。"}], "expectedNodeIds": ["cont-kw-04-target"]},
+        {"id": "cont-kw-05", "term": "双生祭司", "current": "他们之间到底隐瞒了什么？", "recent": [{"role": "user", "content": "双生祭司在祭典前发生争执。"}], "expectedNodeIds": ["cont-kw-05-target"]},
+        {"id": "cont-kw-06", "term": "北境女王", "current": "她会原谅我们的决定吗？", "recent": [{"role": "assistant", "content": "北境女王收到了停战请求。"}], "expectedNodeIds": ["cont-kw-06-target"]},
+        {"id": "cont-kw-07", "term": "灰袍学者", "current": "那份研究后来怎么样了？", "recent": [{"role": "assistant", "content": "灰袍学者找到了龙语石板。"}], "expectedNodeIds": ["cont-kw-07-target"]},
+        {"id": "cont-kw-08", "term": "失忆剑客", "current": "他想起自己的名字了吗？", "recent": [{"role": "user", "content": "失忆剑客在镜中认出了旧伤。"}], "expectedNodeIds": ["cont-kw-08-target"]}
+      ]
+    },
+    {
+      "scenario": "continuity_relation",
+      "category": "continuity",
+      "expectedPosts": 1,
+      "explicitStructured": false,
+      "samples": [
+        {"id": "cont-rel-01", "term": "银龙契约", "current": "它现在还有效吗？", "recent": [{"role": "assistant", "content": "银龙契约要求双方守护边境。"}], "expectedNodeIds": ["cont-rel-01-target"]},
+        {"id": "cont-rel-02", "term": "地下水道入口", "current": "那里还有人守着吗？", "recent": [{"role": "user", "content": "地下水道入口藏在酒馆后院。"}], "expectedNodeIds": ["cont-rel-02-target"]},
+        {"id": "cont-rel-03", "term": "观星台密室", "current": "里面留下了什么？", "recent": [{"role": "assistant", "content": "观星台密室昨夜被人打开。"}], "expectedNodeIds": ["cont-rel-03-target"]},
+        {"id": "cont-rel-04", "term": "商会黑名单", "current": "她为什么会被写上去？", "recent": [{"role": "user", "content": "商会黑名单新增了一个名字。"}], "expectedNodeIds": ["cont-rel-04-target"]}
+      ]
+    },
+    {
+      "scenario": "continuity_hot_graph",
+      "category": "graph_continuity",
+      "expectedPosts": 1,
+      "explicitStructured": false,
+      "samples": [
+        {"id": "hot-graph-01", "term": "折翼乌鸦", "current": "这和之前发生的事有关吗？", "recent": [{"role": "assistant", "content": "折翼乌鸦落在她的窗前。"}], "expectedNodeIds": ["hot-graph-01-target"]},
+        {"id": "hot-graph-02", "term": "碎星指针", "current": "所以我们当时走错方向了吗？", "recent": [{"role": "user", "content": "碎星指针突然指向了南方。"}], "expectedNodeIds": ["hot-graph-02-target"]},
+        {"id": "hot-graph-03", "term": "无字墓碑", "current": "埋在那里的人究竟是谁？", "recent": [{"role": "assistant", "content": "无字墓碑旁一直放着新鲜白花。"}], "expectedNodeIds": ["hot-graph-03-target"]},
+        {"id": "hot-graph-04", "term": "翡翠号角", "current": "那件事是否改变了战局？", "recent": [{"role": "user", "content": "翡翠号角在黎明前被吹响。"}], "expectedNodeIds": ["hot-graph-04-target"]}
+      ]
+    },
+    {
+      "scenario": "theme_judge",
+      "category": "theme",
+      "expectedPosts": 2,
+      "explicitStructured": false,
+      "samples": [
+        {"id": "theme-01", "term": "愧疚", "current": "她的愧疚是不是从那晚开始的？", "expectedNodeIds": ["theme-01-target"]},
+        {"id": "theme-02", "term": "重逢", "current": "这次重逢让他变得不像从前。", "expectedNodeIds": ["theme-02-target"]},
+        {"id": "theme-03", "term": "背叛", "current": "他至今仍不肯谈起那场背叛。", "expectedNodeIds": ["theme-03-target"]},
+        {"id": "theme-04", "term": "守望", "current": "多年的守望终于有了答案。", "expectedNodeIds": ["theme-04-target"]}
+      ]
+    },
+    {
+      "scenario": "ambiguous_judge",
+      "category": "ambiguity",
+      "expectedPosts": 2,
+      "explicitStructured": false,
+      "samples": [
+        {"id": "amb-01", "term": "密道", "current": "我们该从哪一条密道返回地面？", "expectedNodeIds": ["amb-01-0"]},
+        {"id": "amb-02", "term": "舞会", "current": "那场舞会里是谁最先离席？", "expectedNodeIds": ["amb-02-0"]},
+        {"id": "amb-03", "term": "毒酒", "current": "毒酒最后究竟被谁换走了？", "expectedNodeIds": ["amb-03-0"]},
+        {"id": "amb-04", "term": "王位", "current": "关于王位的争执是怎么结束的？", "expectedNodeIds": ["amb-04-0"]}
+      ]
+    }
+  ]
+}

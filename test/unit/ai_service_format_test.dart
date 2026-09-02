@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -21,6 +22,23 @@ http.Response _utf8Response(String body, {int status = 200}) {
       'content-type': 'application/json; charset=utf-8',
     },
   );
+}
+
+class _HangingBodyClient extends http.BaseClient {
+  final StreamController<List<int>> _body = StreamController<List<int>>();
+  int sends = 0;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    sends++;
+    return http.StreamedResponse(_body.stream, 200);
+  }
+
+  @override
+  void close() {
+    _body.close();
+    super.close();
+  }
 }
 
 /// Round-trip 测试：用 [MockClient] 拦截 HTTP 请求，
@@ -167,6 +185,174 @@ void main() {
       expect(secondCaptured.url.toString(),
           'https://example.com/v1/chat/completions');
       expect(reply, 'fallback ok');
+    });
+
+    test('召回预算按实际 POST 计数，并复用已验证的兼容端点', () async {
+      final requestedUrls = <String>[];
+      final mock = MockClient((request) async {
+        requestedUrls.add(request.url.toString());
+        if (request.url.toString() == 'https://example.com/chat/completions') {
+          return _utf8Response('not found', status: 404);
+        }
+        return _utf8Response(jsonEncode(<String, dynamic>{
+          'choices': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'message': <String, dynamic>{'content': 'ok'},
+            },
+          ],
+        }));
+      });
+      final service = AiService(client: mock);
+      const profile = LlmProfile(
+        apiKey: 'sk',
+        baseUrl: 'https://example.com',
+        model: 'm',
+      );
+
+      final firstBudget = RecallRequestBudget(maxPosts: 2);
+      expect(firstBudget.consumed, 0);
+      expect(firstBudget.remaining, 2);
+      expect(
+        await service.ask(
+          'first',
+          contactId: 'c1',
+          contactName: 'Test',
+          profile: profile,
+          requestBudget: firstBudget,
+        ),
+        'ok',
+      );
+      expect(firstBudget.consumed, 2);
+      expect(firstBudget.remaining, 0);
+      expect(firstBudget.isExhausted, isTrue);
+
+      final secondBudget = RecallRequestBudget(maxPosts: 2);
+      expect(
+        await service.ask(
+          'second',
+          contactId: 'c1',
+          contactName: 'Test',
+          profile: profile,
+          requestBudget: secondBudget,
+        ),
+        'ok',
+      );
+      expect(secondBudget.consumed, 1, reason: '后续请求应直达已验证的 /v1 端点');
+      expect(requestedUrls, <String>[
+        'https://example.com/chat/completions',
+        'https://example.com/v1/chat/completions',
+        'https://example.com/v1/chat/completions',
+      ]);
+    });
+
+    test('兼容端点探测不能突破召回请求预算', () async {
+      var attempts = 0;
+      final mock = MockClient((request) async {
+        attempts++;
+        return _utf8Response('not found', status: 404);
+      });
+      final service = AiService(client: mock);
+      final budget = RecallRequestBudget(maxPosts: 1);
+
+      await expectLater(
+        service.ask(
+          'hi',
+          contactId: 'c1',
+          contactName: 'Test',
+          profile: const LlmProfile(
+            apiKey: 'sk',
+            baseUrl: 'https://example.com',
+            model: 'm',
+          ),
+          requestBudget: budget,
+        ),
+        throwsA(
+          isA<AiServiceException>().having(
+            (error) => error.userMessage,
+            'userMessage',
+            contains('预算已耗尽'),
+          ),
+        ),
+      );
+      expect(attempts, 1);
+      expect(budget.consumed, 1);
+      expect(budget.remaining, 0);
+    });
+
+    test('召回 POST 禁止客户端静默跟随重定向', () async {
+      var attempts = 0;
+      final mock = MockClient((request) async {
+        attempts++;
+        expect(request.followRedirects, isFalse);
+        return http.Response(
+          'redirect',
+          307,
+          headers: const <String, String>{
+            'location': 'https://example.com/redirected',
+          },
+        );
+      });
+      final service = AiService(client: mock);
+      final budget = RecallRequestBudget(maxPosts: 2);
+
+      await expectLater(
+        service.ask(
+          'hi',
+          contactId: 'c1',
+          contactName: 'Test',
+          profile: const LlmProfile(
+            apiKey: 'sk',
+            baseUrl: 'https://example.com',
+            model: 'm',
+          ),
+          requestBudget: budget,
+        ),
+        throwsA(isA<AiServiceException>()),
+      );
+      expect(attempts, 1);
+      expect(budget.consumed, 1);
+    });
+
+    test('召回超时覆盖响应体读取而不只覆盖响应头', () async {
+      final client = _HangingBodyClient();
+      final service = AiService(client: client);
+      final budget = RecallRequestBudget(maxPosts: 2);
+      final watch = Stopwatch()..start();
+
+      await expectLater(
+        service.ask(
+          'hi',
+          contactId: 'c1',
+          contactName: 'Test',
+          profile: const LlmProfile(
+            apiKey: 'sk',
+            baseUrl: 'https://example.com',
+            model: 'm',
+            parameters: LlmParameters(timeoutSeconds: 1),
+          ),
+          requestBudget: budget,
+        ),
+        throwsA(
+          isA<AiServiceException>().having(
+            (error) => error.userMessage,
+            'userMessage',
+            contains('超时'),
+          ),
+        ),
+      );
+      watch.stop();
+      client.close();
+
+      expect(watch.elapsed, lessThan(const Duration(seconds: 3)));
+      expect(client.sends, 1);
+      expect(budget.consumed, 1);
+    });
+
+    test('召回请求预算拒绝负数上限', () {
+      expect(
+        () => RecallRequestBudget(maxPosts: -1),
+        throwsRangeError,
+      );
     });
 
     test('405 也触发 fallback；其他 4xx 不重试', () async {

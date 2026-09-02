@@ -17,11 +17,12 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
   late ProviderSettings _settings;
+  LlmProfile? _disabledMemoryRecallDraft;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 4, vsync: this);
     _settings = widget.initial ?? const ProviderSettings();
   }
 
@@ -33,6 +34,36 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage>
 
   void _setLlm(LlmProfile llm) {
     setState(() => _settings = _settings.copyWith(llm: llm));
+  }
+
+  void _setMemoryRecallEnabled(bool enabled) {
+    if (enabled) {
+      final profile = _disabledMemoryRecallDraft ??
+          _settings.llm.copyWith(
+            parameters: _settings.llm.parameters.copyWith(
+              temperature: 0,
+              maxTokens: 128,
+              timeoutSeconds: 12,
+              stream: false,
+            ),
+          );
+      setState(() {
+        _settings = _settings.copyWith(memoryRecallLlm: profile);
+        _disabledMemoryRecallDraft = null;
+      });
+      return;
+    }
+
+    setState(() {
+      _disabledMemoryRecallDraft = _settings.memoryRecallLlm;
+      _settings = _settings.copyWith(clearMemoryRecallLlm: true);
+    });
+  }
+
+  void _setMemoryRecallLlm(LlmProfile profile) {
+    setState(() {
+      _settings = _settings.copyWith(memoryRecallLlm: profile);
+    });
   }
 
   void _activateLocalLlm(LlmProfile profile) {
@@ -104,6 +135,7 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage>
           controller: _tabController,
           tabs: const [
             Tab(icon: Icon(Icons.chat_bubble_outline), text: 'LLM'),
+            Tab(icon: Icon(Icons.manage_search_outlined), text: '召回'),
             Tab(icon: Icon(Icons.image_outlined), text: '生图'),
             Tab(icon: Icon(Icons.record_voice_over_outlined), text: 'TTS'),
           ],
@@ -159,6 +191,12 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage>
               ),
             ],
           ),
+          _MemoryRecallLlmTab(
+            enabled: _settings.memoryRecallLlm != null,
+            profile: _settings.memoryRecallLlm,
+            onEnabledChanged: _setMemoryRecallEnabled,
+            onChanged: _setMemoryRecallLlm,
+          ),
           _ImageTab(
             profile: _settings.image,
             onChanged: _setImage,
@@ -169,6 +207,72 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage>
           ),
         ],
       ),
+    );
+  }
+}
+
+// ============================================================
+// Memory recall LLM Tab
+// ============================================================
+
+class _MemoryRecallLlmTab extends StatelessWidget {
+  const _MemoryRecallLlmTab({
+    required this.enabled,
+    required this.profile,
+    required this.onEnabledChanged,
+    required this.onChanged,
+  });
+
+  final bool enabled;
+  final LlmProfile? profile;
+  final ValueChanged<bool> onEnabledChanged;
+  final ValueChanged<LlmProfile> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final current = profile;
+    return Column(
+      children: [
+        SwitchListTile(
+          title: const Text('使用独立事件召回模型'),
+          subtitle: Text(
+            enabled ? '召回失败时只使用本地结果，不会自动切换到主模型。' : '未启用时，事件召回的额外请求使用主 LLM。',
+          ),
+          value: enabled,
+          onChanged: onEnabledChanged,
+        ),
+        const Divider(height: 1),
+        if (current == null)
+          const Expanded(
+            child: Center(
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Text(
+                  '建议为 PLAN / JUDGE 配置便宜的小模型，'
+                  '以避免占用角色对话主模型的费用。',
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+          )
+        else ...[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: Text(
+              '召回调用会强制使用非流式、低温度和小输出上限；'
+              '此处的账号与模型配置仍与主 LLM 完全独立。',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+          Expanded(
+            child: _LlmTab(
+              key: const ValueKey('memoryRecallLlm'),
+              profile: current,
+              onChanged: onChanged,
+            ),
+          ),
+        ],
+      ],
     );
   }
 }

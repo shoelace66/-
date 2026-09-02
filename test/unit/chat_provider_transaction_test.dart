@@ -340,6 +340,7 @@ class _FakeAiService extends AiService {
     required String contactId,
     required String contactName,
     LlmProfile? profile,
+    RecallRequestBudget? requestBudget,
   }) async {
     if (prompt.contains('提取本轮对话中的关键词')) {
       return '{"keywords":["车票"],"theme":[]}';

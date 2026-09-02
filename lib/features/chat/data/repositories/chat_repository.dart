@@ -102,12 +102,14 @@ class ChatRepository {
     required String contactName,
     required String prompt,
     LlmProfile? profile,
+    RecallRequestBudget? requestBudget,
   }) {
     return _aiService.ask(
       prompt,
       contactId: contactId,
       contactName: contactName,
       profile: profile,
+      requestBudget: requestBudget,
     );
   }
 }

@@ -200,14 +200,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "4.1.2"
-  jieba_flutter:
-    dependency: "direct main"
-    description:
-      name: jieba_flutter
-      sha256: "01d645633a05c67e526d165b3d17343b99acf77afd2230f699cc587705247fd6"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.2.0"
   jni:
     dependency: transitive
     description:

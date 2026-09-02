@@ -127,6 +127,7 @@ class _TimelineAiService extends AiService {
     String? contactId,
     String? contactName,
     LlmProfile? profile,
+    RecallRequestBudget? requestBudget,
   }) async {
     if (prompt.contains('提取本轮对话中的关键词')) {
       return '{"keywords":["测试"],"theme":[]}';

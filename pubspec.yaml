@@ -1,7 +1,7 @@
 name: flutter_chat_demo
 description: Rebuilt chat demo
 publish_to: "none"
-version: 2.2.0+6
+version: 2.3.0+7
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -12,7 +12,6 @@ dependencies:
   audioplayers: 6.5.1
   http: 1.6.0
   shared_preferences: 2.5.4
-  jieba_flutter: 0.2.0
   path: 1.9.1
   sqflite: 2.4.2+1
   path_provider: 2.1.5
@@ -27,7 +26,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  # jieba_flutter 0.2.0 从应用根 AssetBundle 读取这两个固定路径。
-  assets:
-    - assets/dict.txt
-    - assets/prob_emit.txt

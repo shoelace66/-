@@ -579,30 +579,42 @@ class TtsProfile {
   }
 }
 
-/// 三个 provider 配置的合集，持久化到 SharedPreferences 一份
+/// provider 配置的合集，持久化到 SharedPreferences 一份
 @immutable
 class ProviderSettings {
   const ProviderSettings({
     this.llm = const LlmProfile(),
     this.fallbackLlmProfiles = const <LlmProfile>[],
+    this.memoryRecallLlm,
     this.image = const ImageProfile(),
     this.tts = const TtsProfile(),
   });
 
   final LlmProfile llm;
   final List<LlmProfile> fallbackLlmProfiles;
+
+  /// 事件召回专用的廉价 LLM。
+  ///
+  /// 为 null 时由上层显式选择主 [llm]；完成端点层不会自动在两个
+  /// profile 之间降级，避免专用模型失败时意外切换到昂贵主模型。
+  final LlmProfile? memoryRecallLlm;
+
   final ImageProfile image;
   final TtsProfile tts;
 
   ProviderSettings copyWith({
     LlmProfile? llm,
     List<LlmProfile>? fallbackLlmProfiles,
+    LlmProfile? memoryRecallLlm,
+    bool clearMemoryRecallLlm = false,
     ImageProfile? image,
     TtsProfile? tts,
   }) {
     return ProviderSettings(
       llm: llm ?? this.llm,
       fallbackLlmProfiles: fallbackLlmProfiles ?? this.fallbackLlmProfiles,
+      memoryRecallLlm:
+          clearMemoryRecallLlm ? null : memoryRecallLlm ?? this.memoryRecallLlm,
       image: image ?? this.image,
       tts: tts ?? this.tts,
     );
@@ -613,6 +625,7 @@ class ProviderSettings {
         'fallbackLlmProfiles': fallbackLlmProfiles
             .map((profile) => profile.toJson())
             .toList(growable: false),
+        'memoryRecallLlm': memoryRecallLlm?.toJson(),
         'image': image.toJson(),
         'tts': tts.toJson(),
       };
@@ -632,6 +645,9 @@ class ProviderSettings {
               .map((value) => LlmProfile.fromJson(asMap(value)))
               .toList(growable: false) ??
           const <LlmProfile>[],
+      memoryRecallLlm: json['memoryRecallLlm'] is Map
+          ? LlmProfile.fromJson(asMap(json['memoryRecallLlm']))
+          : null,
       image: ImageProfile.fromJson(asMap(json['image'])),
       tts: TtsProfile.fromJson(asMap(json['tts'])),
     );

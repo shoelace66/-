@@ -22,10 +22,42 @@ class AiServiceException implements Exception {
   String toString() => userMessage;
 }
 
+/// 限制单次事件召回流程可发出的实际 HTTP POST 数。
+///
+/// 预算在请求即将发出前扣减，因此超时、网络错误以及 404/405 兼容端点
+/// 探测都会占用一次。它由一次召回协调流程独占，不应跨轮复用。
+class RecallRequestBudget {
+  RecallRequestBudget({this.maxPosts = 2}) {
+    if (maxPosts < 0) {
+      throw RangeError.range(maxPosts, 0, null, 'maxPosts');
+    }
+  }
+
+  final int maxPosts;
+  int _consumed = 0;
+  bool _cancelled = false;
+
+  int get consumed => _consumed;
+  int get remaining => maxPosts - _consumed;
+  bool get isCancelled => _cancelled;
+  bool get isExhausted => _cancelled || remaining <= 0;
+
+  /// 终止本轮状态机，并阻止已在途请求继续触发兼容端点 POST。
+  void cancel() => _cancelled = true;
+
+  /// 仅供真正要发出 HTTP POST 的请求层调用。
+  bool tryConsumePost() {
+    if (isExhausted) return false;
+    _consumed++;
+    return true;
+  }
+}
+
 class AiService {
   AiService({http.Client? client}) : _client = client ?? http.Client();
 
   final http.Client _client;
+  final Map<String, String> _completionEndpointByBaseUrl = <String, String>{};
 
   /// 单次 LLM 调用
   ///
@@ -36,6 +68,7 @@ class AiService {
     required String contactId,
     required String contactName,
     LlmProfile? profile,
+    RecallRequestBudget? requestBudget,
   }) async {
     final effectiveProfile = profile ?? _runtimeProfile();
 
@@ -48,6 +81,7 @@ class AiService {
         prompt: prompt,
         profile: effectiveProfile,
         client: _client,
+        requestBudget: requestBudget,
       );
     } on TimeoutException catch (e) {
       throw AiServiceException('请求超时，请检查网络后重试。', cause: e);
@@ -105,26 +139,35 @@ class AiService {
     required String prompt,
     required LlmProfile profile,
     required http.Client client,
+    RecallRequestBudget? requestBudget,
   }) async {
-    final urls = <String>[
-      '${profile.baseUrl}/chat/completions',
-      '${profile.baseUrl.replaceAll(RegExp(r'/v1$'), '')}/v1/chat/completions',
-    ];
+    final cacheKey = _completionEndpointCacheKey(profile.baseUrl);
+    final urls = _completionEndpointCandidates(
+      profile.baseUrl,
+      cached: _completionEndpointByBaseUrl[cacheKey],
+    );
 
     AiServiceException? lastError;
-    for (final url in urls) {
+    for (var index = 0; index < urls.length; index++) {
+      final url = urls[index];
       try {
-        return await _requestOnce(
+        final result = await _requestOnce(
           prompt: prompt,
           url: url,
           profile: profile,
           client: client,
+          requestBudget: requestBudget,
         );
+        _completionEndpointByBaseUrl[cacheKey] = url;
+        return result;
       } on AiServiceException catch (e) {
         lastError = e;
-        final retryCompat = url == urls.first &&
+        final retryCompat = index < urls.length - 1 &&
             (e.userMessage.contains('HTTP 404') ||
                 e.userMessage.contains('HTTP 405'));
+        if (retryCompat && _completionEndpointByBaseUrl[cacheKey] == url) {
+          _completionEndpointByBaseUrl.remove(cacheKey);
+        }
         if (!retryCompat) rethrow;
       }
     }
@@ -265,6 +308,7 @@ class AiService {
     required String url,
     required LlmProfile profile,
     required http.Client client,
+    RecallRequestBudget? requestBudget,
   }) async {
     final uri = Uri.parse(url);
     final params = profile.parameters;
@@ -286,15 +330,23 @@ class AiService {
       payload['max_tokens'] = params.maxTokens;
     }
 
-    final response = await client
-        .post(
-          uri,
-          headers: <String, String>{
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer ${profile.apiKey.trim()}',
-          },
-          body: jsonEncode(payload),
-        )
+    if (requestBudget != null && !requestBudget.tryConsumePost()) {
+      throw const AiServiceException('事件召回请求预算已耗尽。');
+    }
+
+    // 禁止 HTTP 客户端在内部静默跟随 307/308 并再次 POST；否则一次预算
+    // 扣减可能对应多次实际 POST，破坏事件召回的硬上限。
+    final request = http.Request('POST', uri)
+      ..followRedirects = false
+      ..headers.addAll(<String, String>{
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ${profile.apiKey.trim()}',
+      })
+      ..body = jsonEncode(payload);
+    final response = await (() async {
+      final streamedResponse = await client.send(request);
+      return http.Response.fromStream(streamedResponse);
+    })()
         .timeout(Duration(seconds: params.timeoutSeconds));
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -309,6 +361,30 @@ class AiService {
       );
     }
     return content;
+  }
+
+  String _completionEndpointCacheKey(String baseUrl) {
+    return baseUrl.trim().replaceFirst(RegExp(r'/+$'), '');
+  }
+
+  List<String> _completionEndpointCandidates(
+    String baseUrl, {
+    String? cached,
+  }) {
+    final normalized = _completionEndpointCacheKey(baseUrl);
+    final withoutV1 = normalized.replaceFirst(RegExp(r'/v1$'), '');
+    final result = <String>[];
+
+    void add(String? value) {
+      if (value != null && value.isNotEmpty && !result.contains(value)) {
+        result.add(value);
+      }
+    }
+
+    add(cached);
+    add('$normalized/chat/completions');
+    add('$withoutV1/v1/chat/completions');
+    return result;
   }
 
   /// 从 LLM 原始响应体里抽出"回复文本"

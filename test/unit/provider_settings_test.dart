@@ -166,6 +166,17 @@ void main() {
         fallbackLlmProfiles: <LlmProfile>[
           LlmProfile(apiKey: 'fallback', model: 'fallback-model'),
         ],
+        memoryRecallLlm: LlmProfile(
+          presetId: 'openai',
+          apiKey: 'recall-key',
+          baseUrl: 'https://recall.example/v1',
+          model: 'cheap-model',
+          parameters: LlmParameters(
+            temperature: 0,
+            maxTokens: 128,
+            timeoutSeconds: 12,
+          ),
+        ),
         image: ImageProfile(
           presetId: 'pollinations',
           baseUrl: 'https://x',
@@ -184,6 +195,9 @@ void main() {
       expect(restored.llm.inputPricePerMillion, 1.5);
       expect(restored.llm.outputPricePerMillion, 6);
       expect(restored.fallbackLlmProfiles.single.model, 'fallback-model');
+      expect(restored.memoryRecallLlm?.apiKey, 'recall-key');
+      expect(restored.memoryRecallLlm?.model, 'cheap-model');
+      expect(restored.memoryRecallLlm?.parameters.maxTokens, 128);
       expect(restored.image.presetId, 'pollinations');
       expect(restored.tts.presetId, 'openai_tts');
     });
@@ -191,8 +205,31 @@ void main() {
     test('fromJson 在缺字段时使用子项默认', () {
       final restored = ProviderSettings.fromJson(const <String, dynamic>{});
       expect(restored.llm.presetId, 'deepseek');
+      expect(restored.memoryRecallLlm, isNull);
       expect(restored.image.presetId, 'openai_image');
       expect(restored.tts.presetId, 'edge_tts');
+    });
+
+    test('copyWith 可保留、替换和清除事件召回模型', () {
+      const original = ProviderSettings(
+        memoryRecallLlm: LlmProfile(apiKey: 'old', model: 'cheap-old'),
+      );
+
+      expect(original.copyWith().memoryRecallLlm?.model, 'cheap-old');
+      expect(
+        original
+            .copyWith(
+              memoryRecallLlm:
+                  const LlmProfile(apiKey: 'new', model: 'cheap-new'),
+            )
+            .memoryRecallLlm
+            ?.model,
+        'cheap-new',
+      );
+      expect(
+        original.copyWith(clearMemoryRecallLlm: true).memoryRecallLlm,
+        isNull,
+      );
     });
   });
 

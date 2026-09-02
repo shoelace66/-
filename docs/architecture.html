@@ -63,15 +63,15 @@
 <div class="container">
 
   <header style="margin-bottom: 8px;">
-    <span class="tag">v2.0.5</span>
-    <span class="tag tag-warn">Flutter 3.136 · Dart 3.4+</span>
+    <span class="tag">v2.3.0</span>
+    <span class="tag tag-warn">Flutter 3.41.2 · Dart 3.11+</span>
     <h1 class="font-serif">AI 角色扮演对话应用</h1>
-    <p class="lede">基于 Flutter 的本地 AI 对话引擎：长期记忆、关键词召回 + 事件图 BFS、三级级联、opencode 助手桥接。</p>
+    <p class="lede">基于 Flutter 的本地 AI 对话引擎：长期记忆、低成本 Agent 式事件召回、三级级联、opencode 助手桥接。</p>
   </header>
 
   <h2 class="font-serif">整体架构</h2>
   <div class="card" style="margin-bottom: 16px;">
-    <p style="margin-bottom: 0;"><strong>分层</strong>：UI → ChatProvider（ChangeNotifier）→ 服务层（<code>AiService</code> / <code>OpencodeService</code> / <code>ChatAgentStore</code> / <code>StructuredInputPromptComposer</code> / <code>StructuredOutputRegexParser</code> / <code>ChineseTokenizerService</code>）→ 外部（LLM HTTP API、opencode、SharedPreferences）。</p>
+    <p style="margin-bottom: 0;"><strong>分层</strong>：UI → ChatProvider（ChangeNotifier）→ 领域服务（<code>EventRecallCoordinator</code> / <code>MemoryRecallService</code> / 记忆级联与修订）→ 基础设施（<code>AiService</code> / <code>OpencodeService</code> / SQLite / SharedPreferences）→ 外部模型服务。世界书会进入正文 Prompt，但不参与事件召回。</p>
   </div>
 
   <div class="mermaid">
@@ -80,79 +80,103 @@ graph LR
     A1[ChatPage]
     A2[AssistantConfigPage]
     A3[AppSettingsPage]
-    A4[ContactEditorDialog]
+    A4[ProviderSettingsPage]
+    A5[Memory Archive / Debugger]
   end
 
   subgraph State["状态层"]
     B1[ChatProvider<br/>ChangeNotifier]
   end
 
-  subgraph Svc["服务层"]
-    C1[AiService<br/>HTTP LLM]
-    C2[OpencodeService<br/>HTTP opencode]
-    C4[ChatAgentStore<br/>SharedPreferences]
+  subgraph Domain["领域与应用服务"]
     C5[StructuredInput<br/>PromptComposer]
     C6[StructuredOutput<br/>RegexParser]
-    C7[ChineseTokenizer<br/>jieba]
+    C7[EventRecallCoordinator<br/>L0 → PLAN → JUDGE]
+    C8[MemoryRecallService<br/>结构化索引 + 图评分]
+    C9[Memory Cascade / Revision]
+  end
+
+  subgraph Infra["基础设施"]
+    C1[AiService<br/>HTTP + POST Budget]
+    C2[OpencodeService<br/>HTTP opencode]
+    C3[SQLiteChatPersistence]
+    C4[Settings Stores<br/>SharedPreferences]
   end
 
   subgraph Ext["外部"]
-    D1[LLM API<br/>chat/completions]
+    D1[Dialogue / Recall LLM<br/>chat/completions]
     D2[opencode serve<br/>:4096]
-    D3[SharedPreferences<br/>chat_contacts_v1.xml]
+    D3[Local SQLite]
+    D4[SharedPreferences]
   end
 
   A1 --> B1
   A2 --> B1
   A3 --> B1
   A4 --> B1
+  A5 --> B1
   B1 --> C1
   B1 --> C2
+  B1 --> C3
   B1 --> C4
   B1 --> C5
   B1 --> C6
   B1 --> C7
+  B1 --> C9
+  C7 --> C8
+  C7 --> C1
   C1 --> D1
   C2 --> D2
-  C4 --> D3
+  C3 --> D3
+  C4 --> D4
   </div>
 
   <h2 class="font-serif">角色对话：单轮数据流</h2>
-  <p>"角色"和"故事"走同一条流程（区别仅在 schema 里的 <code>eventDetail</code> 提示语不同）。</p>
+  <p>“角色”和“故事”走同一条结构化输出与记忆流程，使用相同的 <code>eventBrief</code> 字段；两种模式只在对话视角和叙事规则上有所区别。</p>
 
   <div class="mermaid">
 sequenceDiagram
     autonumber
     actor U as User
     participant CP as ChatProvider
-    participant H as Heartbeat<br/>Manager
-    participant FS as Input<br/>Formatter
-    participant KW as Keyword<br/>Extraction
+    participant RC as EventRecall<br/>Coordinator
+    participant L0 as MemoryRecall<br/>Service
     participant CO as Composer
     participant AS as AiService
-    participant LL as LLM
-    participant SP as Store
+    participant RM as Recall LLM
+    participant LL as Dialogue LLM
+    participant DB as SQLite
     participant PR as Parser
 
     U->>CP: sendMessage(text)
-    CP->>H: markReconnecting (网络异常时)
     CP->>CP: _saveSnapshot(contact)
-    CP->>FS: normalize(text)
+    CP->>CP: normalize + 保存 sending 消息
     Note over CP: isLoading=true, isTyping=true
 
-    CP->>KW: _extractTurnKeywords<br/>(本地 jieba + LLM 抽取)
-    KW->>AS: askUtility(prompt 关键词抽取)
-    AS->>LL: POST chat/completions
-    LL-->>AS: JSON {keywords, theme}
-    AS-->>KW: 关键词+主题
-    KW-->>CP: localKeywords / llmKeywords / mergedKeywords
+    CP->>RC: recall(input, recentMessages,<br/>eventGraph, hotNodeIds)
+    RC->>L0: 完整结构化词项匹配 + 图评分
+    alt 本地候选明确
+      L0-->>RC: selected nodes（0 POST）
+    else 存在冷记忆连续性或歧义
+      RC->>AS: PLAN，传临时 K/T/R 目录
+      AS->>RM: POST chat/completions<br/>扣减 RecallRequestBudget
+      RM-->>RC: {action, k, t, r, recency, confidence}
+      RC->>L0: 解析目录 ID 后重新检索
+      opt 候选边界仍不清晰且预算未耗尽
+        RC->>AS: JUDGE，传最多 12 张候选卡
+        AS->>RM: POST chat/completions<br/>扣减 RecallRequestBudget
+        RM-->>RC: {selected: [E...]}
+      end
+    end
+    RC-->>CP: RecallOutcome<br/>(nodes, activeTerms, phase, postCount)
 
     CP->>CO: composeSystemPromptWithContactObject
-    Note over CO: 拼接 固定输入/记忆/状态/联想<br/>+ needSummary 时的待总结事件
+    Note over CO: 热记忆 + 召回冷记忆 + 状态<br/>+ needSummary 时的待总结事件
     CO-->>CP: systemPrompt
 
     CP->>AS: askAi(prompt, contact, settings)
-    AS->>LL: POST chat/completions
+    Note over AS,LL: 正文模型不计入召回的 2 POST 预算
+    AS->>LL: POST chat/completions（正文）
     LL-->>AS: JSON {reply, memoryPatch}
     AS-->>CP: raw
 
@@ -163,7 +187,7 @@ sequenceDiagram
       CP->>CP: currentList.add(ai message)
       CP->>CP: _updateContactFromMemoryPatch
       Note over CP: 合并知识 / 事件 → short-term /<br/>summary? → long-term /<br/>belongings / currentStates /<br/>LRU 排序 / 边关系
-      CP->>SP: saveContacts + saveMessagesByContact
+      CP->>DB: 同一事务提交消息、联系人和事件图
     else 提取失败
       CP-->>U: error="AI 回复格式错误"
     end
@@ -171,7 +195,7 @@ sequenceDiagram
     CP-->>U: notifyListeners → UI 更新
   </div>
 
-  <h2 class="font-serif">三级记忆：短期 → 长期 → 超长期</h2>
+  <h2 id="memory-tiers" class="font-serif">三级记忆：短期 → 长期 → 超长期</h2>
   <p>每轮产生的 <code>eventBrief</code> 进入短期队列；短期累积到阈值后由 LLM 输出 <code>summary</code> 压缩入长期；长期再次累积后再次压缩入超长期。</p>
 
   <div class="mermaid">
@@ -179,11 +203,11 @@ graph TD
   T1["Turn 1..N-1<br/>short-term += eventBrief"]
   T2{{"short-term un-summarized<br/>≥ summaryThreshold (默认 10)?"}}
   T3["LLM 强制输出 summary<br/>(memorPrompt 'mustSummarize=true')"]
-  T4["summary 入 long-term (un-summarized)<br/>旧 brief 搬入 long-term (标 summarized)<br/>新 brief 留在 short-term"]
+  T4["summary 入 long-term (un-summarized)<br/>旧 brief 留在 short-term 并标 summarized<br/>新 brief 留在 short-term"]
   T5["Turn N+1..M<br/>短期重新累积"]
   T6{{"long-term un-summarized<br/>≥ ultraSummaryThreshold (默认 5)?"}}
   T7["LLM 强制输出 summary<br/>(同 schema, 但事件源是 long-term)"]
-  T8["summary 入 ultra-long-term<br/>旧 long-term entry 搬入 ultra-long-term (标 summarized)"]
+  T8["summary 入 ultra-long-term<br/>旧 long-term entry 原地标 summarized"]
   T9["继续累积, 形成多级压缩记忆"]
 
   T1 --> T2
@@ -205,8 +229,8 @@ graph TD
     <tr><td>maxShortTermEvents</td><td>10</td><td>进入 LLM 提示的短期事件数（取最新）</td></tr>
     <tr><td>maxLongTermEvents</td><td>1</td><td>进入 LLM 提示的长期事件数（默认只取最新 summary；老 summary 经 2→3 cascade 进超长期）</td></tr>
     <tr><td>maxUltraTermEvents</td><td>2</td><td>进入 LLM 提示的超长期事件数</td></tr>
-    <tr><td>maxRelatedEvents</td><td>5</td><td>关键词 + 事件图 BFS 召回返回的最大相关事件数（实际生效的召回路径）</td></tr>
-    <tr><td>searchDepth</td><td>2</td><td>相关事件在事件图里的 BFS 跳数</td></tr>
+    <tr><td>maxRelatedEvents</td><td>5</td><td>Agent 召回最终可加入正文 Prompt 的冷记忆上限</td></tr>
+    <tr><td>searchDepth</td><td>2</td><td>本地图评分的关系扩展深度；V1 定义一跳和二跳贡献</td></tr>
   </table>
 
   <h2 class="font-serif">边关系与 LRU 排序</h2>
@@ -223,22 +247,73 @@ sequenceDiagram
     Note over G: 下次 _sortEventsByLruScore 时<br/>邻居事件得到 lruEventEventWeight 加成
   </div>
 
-  <h2 class="font-serif">关键词召回与事件图 BFS</h2>
+  <h2 id="event-recall" class="font-serif">低成本 Agent 式事件召回</h2>
+
+  <p>召回采用固定的“计划 → 本地工具 → 观察 → 裁决”状态机，不允许模型自行循环。世界书和 <code>knowledgeNodes</code> 不进入该流程。</p>
 
   <div class="mermaid">
-graph LR
-  UI[用户输入]
-  KW1[ChineseTokenizer<br/>jieba cut]
-  KW2[LLM 抽取<br/>askUtility]
-  KW3[merged<br/>+ 主题]
-  BFS[relatedEventsForPrompt<br/>事件图 BFS<br/>深度=searchDepth]
-  PP[相关事件入 prompt<br/>联想内容段]
-  UI --> KW1 --> KW3
-  UI --> KW2 --> KW3
-  KW3 --> BFS --> PP
+flowchart TD
+  INPUT[当前输入 + 最近 4 条有效消息]
+  L0[L0：完整结构化词项匹配<br/>keyword / theme / relation]
+  COLD{存在可用冷记忆?}
+  CLEAR{强证据且候选明确?}
+  PLAN[PLAN：最多 1 POST<br/>只选择 K/T/R 临时 ID]
+  TOOL[本地索引检索<br/>确定性评分 + 一/二跳扩展]
+  DECIDE{最多 5 条且边界清晰?}
+  JUDGE[JUDGE：最多 1 POST<br/>只选择 E0..E11]
+  OUT[相关事件进入正文 Prompt]
+  EMPTY[0 POST：不追加冷记忆]
+
+  INPUT --> L0 --> COLD
+  COLD -- 否 --> EMPTY
+  COLD -- 是 --> CLEAR
+  CLEAR -- 是，0 POST --> OUT
+  CLEAR -- 否 --> PLAN --> TOOL --> DECIDE
+  DECIDE -- 是，累计 1 POST --> OUT
+  DECIDE -- 否且有预算 --> JUDGE --> OUT
+  DECIDE -- 否且预算耗尽 --> OUT
   </div>
 
-  <p style="font-size: 14px; color: var(--muted);">关键词抽取（本地 jieba + LLM 抽取）合并后作为 BFS 的起点，按 <code>searchDepth</code> 在事件图上做邻居扩展，结果合并去重后填入 prompt 的"联想内容"段。这是<strong>当前实际生效</strong>的召回路径。</p>
+  <div class="grid grid-2">
+    <div class="card">
+      <h3 style="margin-top: 0;">L0：无分词的完整词项匹配</h3>
+      <ul>
+        <li>只索引事件 <code>keywords/theme</code>、物品/设定关系键和事件边</li>
+        <li>只做 trim、ASCII 小写、全角转半角、空白与常见标点归一</li>
+        <li>重叠词保留最长项；CJK 单字只允许整段相等；拉丁词要求字母数字边界</li>
+        <li>不扫描 <code>description/sourceDialog</code>，不使用 jieba、n-gram、拼音、编辑距离或同义词</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3 style="margin-top: 0;">模型阶段：受限选择器</h3>
+      <ul>
+        <li>PLAN 输入最多 600 字当前输入、4 条历史和有上限的结构化目录</li>
+        <li>JUDGE 最多看到 12 张精简候选卡，最终选择不超过 5 个事件</li>
+        <li>两阶段都使用严格 JSON、临时 ID 白名单、低温度、非流式和小输出上限</li>
+        <li>独立召回模型失败时直接用本地结果，不切换昂贵主模型</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3 class="font-serif" style="font-size: 16px; margin-top: 18px;">协议与输入边界</h3>
+  <table>
+    <tr><th>阶段</th><th>输入上限</th><th>输出白名单</th></tr>
+    <tr><td>PLAN</td><td>当前输入 600 字符；最近 4 条各 160 字符；目录 96 keywords / 32 themes / 48 relations；总计 3200 字符</td><td><code>action</code>、最多 8 个 K / 4 个 T / 4 个 R、<code>recency</code>、<code>confidence</code></td></tr>
+    <tr><td>JUDGE</td><td>最多 12 张候选卡；description 每条 140 字符；总计 4800 字符；不发送 sourceDialog</td><td>最多 5 个冻结的 E ID 与 <code>confidence</code></td></tr>
+  </table>
+
+  <h3 class="font-serif" style="font-size: 16px; margin-top: 18px;">本地确定性评分</h3>
+  <table>
+    <tr><th>证据</th><th>分值 / 规则</th><th>说明</th></tr>
+    <tr><td>keyword</td><td>每项 +120，最多 3 项</td><td>最强直接证据</td></tr>
+    <tr><td>relation</td><td>每项 +100，最多 2 项</td><td>完整 belonging / setting 键</td></tr>
+    <tr><td>theme</td><td>每项 +35，最多 2 项</td><td>仅 theme 命中不能直接确认</td></tr>
+    <tr><td>证据组合</td><td>命中至少两类 +25</td><td>被两个以上直接种子连接再 +10</td></tr>
+    <tr><td>图扩展</td><td>一跳 min(70, seed × 0.40)；二跳 min(30, seed × 0.18)</td><td>多路径取最大贡献，避免环图堆分</td></tr>
+    <tr><td>节点状态</td><td>summarized −10；needsReview −120</td><td>invalidated 直接排除；待复核节点不自动确认</td></tr>
+  </table>
+
+  <div class="note"><strong>严格 POST 预算：</strong>每轮创建一个 <code>RecallRequestBudget(maxPosts: 2)</code>，在真正发送 HTTP POST 前扣减。失败请求和 404/405 兼容端点探测也计数；成功端点按 Base URL 缓存，减少后续探测成本。正文对话模型不计入这两个召回 POST。</div>
 
   <h2 class="font-serif">助手（opencode）数据流</h2>
   <p>助手联系人走 <code>OpencodeService</code>，不进入角色扮演的记忆/事件图。</p>
@@ -275,12 +350,18 @@ sequenceDiagram
 
   <table>
     <tr><th>数据</th><th>存储</th><th>位置</th></tr>
-    <tr><td>联系人 (含 eventGraph)</td><td>SharedPreferences</td><td>chat_contacts_v1</td></tr>
-    <tr><td>消息历史</td><td>SharedPreferences</td><td>chat_messages_v1</td></tr>
+    <tr><td>联系人</td><td>SQLite v3</td><td>contacts</td></tr>
+    <tr><td>消息历史</td><td>SQLite v3</td><td>messages</td></tr>
+    <tr><td>三级事件</td><td>SQLite v3</td><td>event_nodes</td></tr>
+    <tr><td>事件边与关系队列</td><td>SQLite v3</td><td>event_edges / event_relations</td></tr>
+    <tr><td>事件图元数据</td><td>SQLite v3</td><td>memory_meta</td></tr>
     <tr><td>Agent 设置</td><td>SharedPreferences</td><td>chat_settings_v1</td></tr>
     <tr><td>App 设置</td><td>SharedPreferences</td><td>app_settings_v1</td></tr>
+    <tr><td>正文 / 备用 / 召回 / 生图 / TTS Profile</td><td>SharedPreferences</td><td>provider_settings_v1</td></tr>
     <tr><td>opencode 连接配置</td><td>SharedPreferences</td><td>opencode_connection_v1</td></tr>
   </table>
+
+  <p>旧 SharedPreferences 联系人与消息在首次启动时校验并迁移到 SQLite；v2.3.0 的召回升级只建立运行时派生索引，不修改 SQLite schema，也不要求重写现有事件数据。</p>
 
   <h2 class="font-serif">远程连接（PC 上的 opencode）</h2>
   <p>Android 9+ 默认禁明文 HTTP，已通过 <code>network_security_config.xml</code> 放行；如走 HTTPS 反代，UI 有开关可切。</p>
@@ -301,7 +382,9 @@ sequenceDiagram
 
   <h2 class="font-serif">已知限制</h2>
   <ul>
-    <li><code>VectorMemoryService</code> 代码仍在但完全未接入，Dart 生态无合适向量数据库和 embedding 模型。可安全删除</li>
+    <li>V1 依赖正文模型写入的结构化 <code>keywords/theme</code> 和关系键；别名未统一或事件漏标时不会用模糊字符算法猜测</li>
+    <li>当前输入与最近 4 条有效消息都没有指向冷记忆的完整规范词项时，召回以 0 POST 结束；这是费用优先的明确取舍</li>
+    <li>向量、Embedding、FTS、BM25 和故事内时间推断未启用；兼容字段 <code>vectorSimilarityWeight</code> 不参与 Agent 召回</li>
     <li><code>legacy events: EventLruBucket</code> 仍在写但 prompt 只读 <code>eventGraph</code>，旧字段累积是冗余</li>
     <li>SSH 模式在 <code>OpencodeService._executeViaSsh</code> 里直接返回"不可用"占位，HTTP 模式才是主路径</li>
     <li>opencode 的 <code>POST /session/:id/message</code> 是同步等待；AI 任务长时（&gt;300s）可能撞默认超时，可在设置里调</li>
