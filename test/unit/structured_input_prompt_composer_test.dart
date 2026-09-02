@@ -59,6 +59,22 @@ void main() {
       expect(result.contains('【系统提示】'), isFalse);
     });
 
+    test('缓存友好请求把固定 system 与动态 user 严格分离', () {
+      final composer = StructuredInputPromptComposer();
+      final result = composer.composeStructuredOutputPromptParts(
+        userInput: '继续推门',
+        systemPrompt: '固定规则与角色设定',
+        dynamicContext: '上一轮停在门已经推开一道缝',
+        outputSchema: '{"reply":"string"}',
+      );
+
+      expect(result.systemPrompt, contains('固定规则与角色设定'));
+      expect(result.systemPrompt, isNot(contains('门已经推开一道缝')));
+      expect(result.systemPrompt, isNot(contains('继续推门')));
+      expect(result.userPrompt, contains('门已经推开一道缝'));
+      expect(result.userPrompt, endsWith('继续推门'));
+    });
+
     test('composeStructuredOutputPrompt 使用自定义 settings', () {
       final composer = StructuredInputPromptComposer(
         settings: const AppSettings(maxPromptLineLength: 50),
@@ -106,6 +122,110 @@ void main() {
         prompt.indexOf('"memoryPatch"'),
         lessThan(prompt.indexOf('"reply"')),
       );
+      expect(prompt, contains('上一轮终点/连续性锚点'));
+      expect(prompt, contains('已经开始或完成的动作不得退回'));
+      expect(prompt, contains('上一段 reply 与本轮 reply 会被直接拼接'));
+    });
+
+    test('低频事件位于缓存前缀，短期事件和总结任务位于动态尾部', () {
+      const ultra = EventNode(
+        id: 'ultra-1',
+        tier: EventTier.ultraLongTerm,
+        event: EventMemory(description: '很久以前两人已经相识'),
+        createdAtMs: 1,
+      );
+      const long = EventNode(
+        id: 'long-1',
+        tier: EventTier.longTerm,
+        event: EventMemory(description: '两人抵达旧宅'),
+        createdAtMs: 2,
+      );
+      const short = EventNode(
+        id: 'short-1',
+        tier: EventTier.shortTerm,
+        event: EventMemory(description: '门已经被推开一道缝'),
+        createdAtMs: 3,
+      );
+      final composer = StructuredInputPromptComposer();
+      final sections = composer.composeSystemPromptSectionsWithContactObject(
+        basePrompt: '保持连续',
+        contact: Contact(
+          id: 'role-cache',
+          name: '林夏',
+          avatar: '',
+          fixedInput: '固定角色设定',
+          eventGraph: const EventGraphMemory(
+            ultraLongTermQueue: <EventNode>[ultra],
+            longTermQueue: <EventNode>[long],
+            shortTermQueue: <EventNode>[short],
+          ),
+          createdAt: DateTime(2026),
+        ),
+        mustSummarize: true,
+        pendingSummaryEvents: const <EventMemory>[
+          EventMemory(description: '需要总结的旧事件'),
+        ],
+      );
+
+      expect(sections.cacheablePrefix, contains('固定角色设定'));
+      expect(sections.cacheablePrefix, contains('很久以前两人已经相识'));
+      expect(sections.cacheablePrefix, contains('两人抵达旧宅'));
+      expect(sections.cacheablePrefix, isNot(contains('门已经被推开一道缝')));
+      expect(
+        sections.cacheablePrefix,
+        isNot(contains('【强制】本轮必须输出 memoryPatch.summary。')),
+      );
+      expect(sections.dynamicContext, contains('门已经被推开一道缝'));
+      expect(sections.dynamicContext, contains('[2] [active] [上一轮终点/连续性锚点]'));
+      expect(sections.dynamicContext, contains('【强制】'));
+      expect(sections.dynamicContext, contains('需要总结的旧事件'));
+
+      final merged = sections.merged;
+      expect(
+        merged.indexOf('所有指令均已载入'),
+        lessThan(merged.indexOf('门已经被推开一道缝')),
+      );
+    });
+
+    test('连续两轮只更新短期事件时 system 缓存前缀保持完全一致', () {
+      Contact contactWithShort(String id, String description) => Contact(
+            id: 'role-cache-stable',
+            name: '林夏',
+            avatar: '',
+            fixedInput: '固定角色设定',
+            eventGraph: EventGraphMemory(
+              longTermQueue: const <EventNode>[
+                EventNode(
+                  id: 'long-stable',
+                  tier: EventTier.longTerm,
+                  event: EventMemory(description: '两人已经抵达旧宅'),
+                  createdAtMs: 1,
+                ),
+              ],
+              shortTermQueue: <EventNode>[
+                EventNode(
+                  id: id,
+                  tier: EventTier.shortTerm,
+                  event: EventMemory(description: description),
+                  createdAtMs: 2,
+                ),
+              ],
+            ),
+            createdAt: DateTime(2026),
+          );
+
+      final composer = StructuredInputPromptComposer();
+      final first = composer.composeSystemPromptSectionsWithContactObject(
+        basePrompt: '保持连续',
+        contact: contactWithShort('short-1', '手已经搭在门把上'),
+      );
+      final second = composer.composeSystemPromptSectionsWithContactObject(
+        basePrompt: '保持连续',
+        contact: contactWithShort('short-2', '门已经被推开一道缝'),
+      );
+
+      expect(first.cacheablePrefix, second.cacheablePrefix);
+      expect(first.dynamicContext, isNot(second.dynamicContext));
     });
 
     test('故事 Prompt 禁止 AI 擅自推动主线', () {

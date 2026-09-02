@@ -115,6 +115,40 @@ void main() {
       expect(reply, '你好');
     });
 
+    test('角色请求把稳定 system 前缀放在动态 user 输入之前', () async {
+      late http.Request captured;
+      final mock = MockClient((request) async {
+        captured = request;
+        return _utf8Response(jsonEncode(<String, dynamic>{
+          'choices': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'message': <String, dynamic>{'content': 'ok'},
+            },
+          ],
+        }));
+      });
+
+      await AiService(client: mock).ask(
+        '本轮动态上下文\n【用户输入】\n继续推门',
+        systemPrompt: '固定协议\n固定角色设定',
+        contactId: 'c1',
+        contactName: 'Test',
+        profile: const LlmProfile(
+          apiKey: 'sk',
+          baseUrl: 'https://example.com/v1',
+          model: 'm',
+        ),
+      );
+
+      final body = jsonDecode(captured.body) as Map<String, dynamic>;
+      final messages = body['messages'] as List;
+      expect(messages, hasLength(2));
+      expect(messages[0]['role'], 'system');
+      expect(messages[0]['content'], '固定协议\n固定角色设定');
+      expect(messages[1]['role'], 'user');
+      expect(messages[1]['content'], endsWith('继续推门'));
+    });
+
     test('max_tokens=0 时不写入字段', () async {
       late http.Request captured;
       final mock = MockClient((request) async {
@@ -977,6 +1011,7 @@ data: [DONE]
       final chunks = await AiService(client: mock)
           .askStream(
             'hi',
+            systemPrompt: 'stable',
             contactId: 'c1',
             contactName: 'Test',
             profile: const LlmProfile(
@@ -989,7 +1024,13 @@ data: [DONE]
 
       expect(chunks, ['你', '好']);
       expect(captured.headers['Accept'], 'text/event-stream');
-      expect(jsonDecode(captured.body)['stream'], isTrue);
+      final body = jsonDecode(captured.body) as Map<String, dynamic>;
+      expect(body['stream'], isTrue);
+      final messages = body['messages'] as List;
+      expect(messages[0]['role'], 'system');
+      expect(messages[0]['content'], 'stable');
+      expect(messages[1]['role'], 'user');
+      expect(messages[1]['content'], 'hi');
     });
 
     test('askStream 在首个端点 404 时回退到兼容路径', () async {

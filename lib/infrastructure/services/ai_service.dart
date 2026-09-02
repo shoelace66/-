@@ -67,6 +67,7 @@ class AiService {
     String prompt, {
     required String contactId,
     required String contactName,
+    String? systemPrompt,
     LlmProfile? profile,
     RecallRequestBudget? requestBudget,
   }) async {
@@ -79,6 +80,7 @@ class AiService {
     try {
       return await _requestWithFallback(
         prompt: prompt,
+        systemPrompt: systemPrompt,
         profile: effectiveProfile,
         client: _client,
         requestBudget: requestBudget,
@@ -102,6 +104,7 @@ class AiService {
     String prompt, {
     required String contactId,
     required String contactName,
+    String? systemPrompt,
     LlmProfile? profile,
   }) async* {
     final effectiveProfile = profile ?? _runtimeProfile();
@@ -111,6 +114,7 @@ class AiService {
     try {
       yield* _requestStreamWithFallback(
         prompt: prompt,
+        systemPrompt: systemPrompt,
         profile: effectiveProfile,
         client: _client,
       );
@@ -137,6 +141,7 @@ class AiService {
 
   Future<String> _requestWithFallback({
     required String prompt,
+    String? systemPrompt,
     required LlmProfile profile,
     required http.Client client,
     RecallRequestBudget? requestBudget,
@@ -153,6 +158,7 @@ class AiService {
       try {
         final result = await _requestOnce(
           prompt: prompt,
+          systemPrompt: systemPrompt,
           url: url,
           profile: profile,
           client: client,
@@ -176,6 +182,7 @@ class AiService {
 
   Stream<String> _requestStreamWithFallback({
     required String prompt,
+    String? systemPrompt,
     required LlmProfile profile,
     required http.Client client,
   }) async* {
@@ -189,6 +196,7 @@ class AiService {
       try {
         await for (final chunk in _requestStreamOnce(
           prompt: prompt,
+          systemPrompt: systemPrompt,
           url: url,
           profile: profile,
           client: client,
@@ -211,6 +219,7 @@ class AiService {
 
   Stream<String> _requestStreamOnce({
     required String prompt,
+    String? systemPrompt,
     required String url,
     required LlmProfile profile,
     required http.Client client,
@@ -218,9 +227,7 @@ class AiService {
     final params = profile.parameters;
     final payload = <String, dynamic>{
       'model': profile.model,
-      'messages': <Map<String, String>>[
-        <String, String>{'role': 'user', 'content': prompt},
-      ],
+      'messages': _buildMessages(prompt, systemPrompt: systemPrompt),
       'temperature': params.temperature,
       'top_p': params.topP,
       'frequency_penalty': params.frequencyPenalty,
@@ -305,6 +312,7 @@ class AiService {
 
   Future<String> _requestOnce({
     required String prompt,
+    String? systemPrompt,
     required String url,
     required LlmProfile profile,
     required http.Client client,
@@ -314,12 +322,7 @@ class AiService {
     final params = profile.parameters;
     final payload = <String, dynamic>{
       'model': profile.model,
-      'messages': <Map<String, String>>[
-        <String, String>{
-          'role': 'user',
-          'content': prompt,
-        },
-      ],
+      'messages': _buildMessages(prompt, systemPrompt: systemPrompt),
       'temperature': params.temperature,
       'top_p': params.topP,
       'frequency_penalty': params.frequencyPenalty,
@@ -361,6 +364,18 @@ class AiService {
       );
     }
     return content;
+  }
+
+  List<Map<String, String>> _buildMessages(
+    String prompt, {
+    String? systemPrompt,
+  }) {
+    final stablePrefix = systemPrompt?.trim() ?? '';
+    return <Map<String, String>>[
+      if (stablePrefix.isNotEmpty)
+        <String, String>{'role': 'system', 'content': stablePrefix},
+      <String, String>{'role': 'user', 'content': prompt},
+    ];
   }
 
   String _completionEndpointCacheKey(String baseUrl) {

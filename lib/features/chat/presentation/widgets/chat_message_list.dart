@@ -27,6 +27,7 @@ class ChatMessageList extends StatelessWidget {
     required this.onQuote,
     required this.onGenerateCandidate,
     required this.onShowCandidates,
+    this.assistantLabel,
   });
 
   final List<Message> messages;
@@ -50,6 +51,7 @@ class ChatMessageList extends StatelessWidget {
   final ValueChanged<Message> onQuote;
   final ValueChanged<Message> onGenerateCandidate;
   final ValueChanged<Message> onShowCandidates;
+  final String? assistantLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -115,6 +117,9 @@ class ChatMessageList extends StatelessWidget {
                   onDelete: () => onDelete(message),
                   onQuote: () => onQuote(message),
                   onGenerateCandidate: () => onGenerateCandidate(message),
+                  authorLabel: message.role == MessageRole.assistant
+                      ? assistantLabel
+                      : null,
                   onShowCandidates: message.alternatives.isEmpty
                       ? null
                       : () => onShowCandidates(message),

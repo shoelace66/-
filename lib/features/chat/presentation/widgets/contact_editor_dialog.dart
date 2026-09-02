@@ -316,6 +316,9 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
   "name": "角色名称",
   "avatar": "★",
   "fixedInput": "你是...",
+  "personality": ["理性", "克制"],
+  "appearance": ["短发", "黑色风衣"],
+  "backgroundStory": ["成长经历", "核心信念"],
   "currentStates": {
     "好感度": "",
     "当前位置": ""
@@ -330,12 +333,19 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
           const SizedBox(height: 12),
           TextField(
             controller: _jsonCtrl,
-            minLines: 10,
-            maxLines: 15,
+            minLines: 14,
+            maxLines: 20,
+            style: const TextStyle(fontFamily: 'monospace'),
             decoration: const InputDecoration(
               labelText: 'JSON 格式',
+              hintText: '支持完整 JSON，留空字段可为空数组/字符串',
               border: OutlineInputBorder(),
             ),
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            '说明：请保持合法 JSON，可直接保存并生成；支持多行、缩进和长文本。',
+            style: TextStyle(fontSize: 12, color: Colors.grey),
           ),
           Align(
             alignment: Alignment.centerLeft,
@@ -351,7 +361,7 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
 
   Widget _buildNaturalLanguageForm() {
     if (_nlCtrl.text.isEmpty) {
-      _nlCtrl.text = '创建一个角色，固定输入内容是：你是...；需要记录的状态有：好感度、当前位置。';
+      _nlCtrl.text = '创建一个角色，固定输入内容是：你是……；需要记录的状态有：好感度、当前位置，风格上要偏向成熟稳重。';
     }
     return SingleChildScrollView(
       child: Column(
@@ -361,10 +371,12 @@ class _ContactEditorDialogState extends State<ContactEditorDialog> {
           const SizedBox(height: 12),
           TextField(
             controller: _nlCtrl,
-            minLines: 6,
-            maxLines: 10,
+            minLines: 8,
+            maxLines: 16,
+            style: const TextStyle(fontSize: 14, height: 1.4),
             decoration: const InputDecoration(
               labelText: '自然语言描述',
+              hintText: '例如：一个擅长观察、善于分析的侦探角色，沉默寡言但会主动引导用户对话。',
               border: OutlineInputBorder(),
             ),
           ),

@@ -7,6 +7,7 @@ class MessageBubble extends StatelessWidget {
   const MessageBubble({
     super.key,
     required this.message,
+    this.authorLabel,
     required this.onRetry,
     required this.onGenerateImage,
     required this.onSpeak,
@@ -22,6 +23,7 @@ class MessageBubble extends StatelessWidget {
   });
 
   final Message message;
+  final String? authorLabel;
   final VoidCallback onRetry;
   final VoidCallback onGenerateImage;
   final VoidCallback? onRegenerate;
@@ -39,9 +41,12 @@ class MessageBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final isUser = message.role == MessageRole.user;
     final isDebug = message.content.startsWith('【调试信息】');
+    final label = isUser
+        ? '我'
+        : (authorLabel?.trim().isNotEmpty == true ? authorLabel! : 'AI');
     final theme = Theme.of(context);
     return Semantics(
-      label: '${isUser ? "用户" : "AI"}消息：${message.content}',
+      label: '${isUser ? "用户" : label}消息：${message.content}',
       child: Align(
         alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
         child: ConstrainedBox(
@@ -50,7 +55,7 @@ class MessageBubble extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.end,
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (!isUser) const _Avatar(label: 'AI'),
+              if (!isUser) _Avatar(label: label),
               Expanded(
                 child: Container(
                   margin: const EdgeInsets.symmetric(vertical: 6),
@@ -71,14 +76,26 @@ class MessageBubble extends StatelessWidget {
                       bottomRight: Radius.circular(isUser ? 4 : 18),
                     ),
                   ),
-                  child: GestureDetector(
+                  child: InkWell(
                     onLongPress: () => _showActions(context, isUser, isDebug),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        SelectableText(
+                        Text(
+                          label,
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            fontWeight: FontWeight.w600,
+                            color: isDebug
+                                ? Colors.amber.shade900
+                                : theme.colorScheme.onSurface
+                                    .withValues(alpha: 0.7),
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
                           message.content,
                           style: const TextStyle(fontSize: 15, height: 1.4),
+                          maxLines: null,
                         ),
                         const SizedBox(height: 6),
                         Row(
@@ -387,7 +404,13 @@ class _Avatar extends StatelessWidget {
           shape: BoxShape.circle,
         ),
         alignment: Alignment.center,
-        child: Text(label, style: const TextStyle(fontWeight: FontWeight.bold)),
+        child: Text(
+          label.isEmpty ? '?' : label.characters.take(2).join(),
+          style: const TextStyle(fontWeight: FontWeight.bold),
+          textAlign: TextAlign.center,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
       );
 }
 

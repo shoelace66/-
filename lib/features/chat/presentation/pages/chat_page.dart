@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../../../app_router.dart';
 import '../../../../core/data/models/provider_settings.dart';
@@ -361,9 +362,15 @@ class _ChatPageState extends State<ChatPage> {
         return;
       }
 
+      final reviewed = await _previewGeneratedJson(
+        categoryLabel: categoryLabel,
+        generatedJson: jsonStr,
+      );
+      if (reviewed == null) return;
+
       // 使用转换后的 JSON 创建，合并表单中填写的字段
       final ok = await _provider.addContactFromJsonWithFallback(
-        jsonStr,
+        reviewed,
         category: result.category,
         fallbackName: result.name.isNotEmpty ? result.name : null,
         fallbackAvatar: result.avatar.isNotEmpty ? result.avatar : null,
@@ -389,9 +396,15 @@ class _ChatPageState extends State<ChatPage> {
 
     // 判断是否是 JSON 模式
     if (result.isJsonMode) {
+      final reviewed = await _previewGeneratedJson(
+        categoryLabel: '$categoryLabel（JSON）',
+        generatedJson: result.jsonString!,
+      );
+      if (reviewed == null) return;
+
       // 使用 JSON 创建，合并表单中填写的字段作为后备
       final ok = await _provider.addContactFromJsonWithFallback(
-        result.jsonString!,
+        reviewed,
         category: result.category,
         fallbackName: result.name.isNotEmpty ? result.name : null,
         fallbackAvatar: result.avatar.isNotEmpty ? result.avatar : null,
@@ -430,6 +443,62 @@ class _ChatPageState extends State<ChatPage> {
         context,
       ).showSnackBar(SnackBar(content: Text('$categoryLabel创建成功')));
     }
+  }
+
+  Future<String?> _previewGeneratedJson({
+    required String categoryLabel,
+    required String generatedJson,
+  }) async {
+    final controller = TextEditingController(text: generatedJson);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('AI 生成$categoryLabel JSON（可编辑）'),
+        content: SizedBox(
+          width: 760,
+          child: SizedBox(
+            height: 420,
+            child: TextField(
+              controller: controller,
+              minLines: null,
+              maxLines: null,
+              maxLength: null,
+              expands: true,
+              keyboardType: TextInputType.multiline,
+              style: const TextStyle(fontFamily: 'monospace', height: 1.25),
+              decoration: const InputDecoration(
+                alignLabelWithHint: true,
+                border: OutlineInputBorder(),
+                labelText: 'JSON 内容',
+                helperText: '支持直接编辑，确保 JSON 合法。将直接用于角色创建。',
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: controller.text));
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('AI 生成 JSON 已复制到剪贴板')),
+              );
+            },
+            child: const Text('复制'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+            child: const Text('使用该 JSON 创建'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    return result;
   }
 
   Future<void> _recallLastTurn() async {
@@ -766,6 +835,7 @@ class _ChatPageState extends State<ChatPage> {
                   onSpeak: _speakMessage,
                   onStopSpeak: _stopSpeaking,
                   isSpeaking: _mediaController.isSpeaking,
+                  assistantLabel: selected.name,
                   onEdit: _editMessage,
                   onDelete: _deleteMessage,
                   onQuote: _quoteMessage,

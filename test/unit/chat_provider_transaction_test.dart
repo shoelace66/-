@@ -339,6 +339,7 @@ class _FakeAiService extends AiService {
     String prompt, {
     required String contactId,
     required String contactName,
+    String? systemPrompt,
     LlmProfile? profile,
     RecallRequestBudget? requestBudget,
   }) async {
@@ -361,6 +362,7 @@ class _FakeAiService extends AiService {
     String prompt, {
     required String contactId,
     required String contactName,
+    String? systemPrompt,
     LlmProfile? profile,
   }) {
     final stream = pendingStream;

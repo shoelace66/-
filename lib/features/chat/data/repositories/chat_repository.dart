@@ -39,6 +39,7 @@ class ChatRepository {
     required String contactName,
     required Message userMessage,
     String? systemPrompt,
+    String? dynamicContext,
     AppSettings? settings,
     LlmProfile? profile,
   }) async {
@@ -48,16 +49,18 @@ class ChatRepository {
     final composer = StructuredInputPromptComposer(
       settings: settings ?? const AppSettings(),
     );
-    final mergedPrompt = composer.composeStructuredOutputPrompt(
+    final promptParts = composer.composeStructuredOutputPromptParts(
       userInput: userMessage.content,
       systemPrompt: systemPrompt,
+      dynamicContext: dynamicContext,
       outputSchema: outputSchema,
     );
 
     final assistantReply = await _aiService.ask(
-      mergedPrompt,
+      promptParts.userPrompt,
       contactId: contactId,
       contactName: contactName,
+      systemPrompt: promptParts.systemPrompt,
       profile: profile,
     );
 
@@ -76,6 +79,7 @@ class ChatRepository {
     required String contactName,
     required Message userMessage,
     String? systemPrompt,
+    String? dynamicContext,
     AppSettings? settings,
     LlmProfile? profile,
   }) {
@@ -84,15 +88,17 @@ class ChatRepository {
     final composer = StructuredInputPromptComposer(
       settings: settings ?? const AppSettings(),
     );
-    final prompt = composer.composeStructuredOutputPrompt(
+    final promptParts = composer.composeStructuredOutputPromptParts(
       userInput: userMessage.content,
       systemPrompt: systemPrompt,
+      dynamicContext: dynamicContext,
       outputSchema: outputSchema,
     );
     return _aiService.askStream(
-      prompt,
+      promptParts.userPrompt,
       contactId: contactId,
       contactName: contactName,
+      systemPrompt: promptParts.systemPrompt,
       profile: profile,
     );
   }

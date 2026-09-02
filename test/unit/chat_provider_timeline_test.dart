@@ -126,6 +126,7 @@ class _TimelineAiService extends AiService {
     String prompt, {
     String? contactId,
     String? contactName,
+    String? systemPrompt,
     LlmProfile? profile,
     RecallRequestBudget? requestBudget,
   }) async {

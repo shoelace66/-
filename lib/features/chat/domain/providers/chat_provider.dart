@@ -54,6 +54,15 @@ import '../../../worldbook/domain/entities/world_book.dart';
 class ChatProvider extends ChangeNotifier {
   static const int _messagePageSize = 100;
 
+  /// 用户可见正文的最小阅读时长（秒）目标：按 5 秒阅读。
+  static const int _minReplyReadingSeconds = 5;
+
+  // 粗略可读性估算：中文按 6 个/秒，英文按 2.2 个词/秒。
+  // 5 秒目标下，中文约 30 字，英文约 11 词；再叠加 180 字兜底，避免混合输出仍过短。
+  static const double _readabilityChineseCharsPerSecond = 6.0;
+  static const double _readabilityEnglishWordsPerSecond = 2.2;
+  static const int _minReplyLengthFallbackChars = 180;
+
   /// 构造函数
   ///
   /// 支持依赖注入，便于单元测试
@@ -455,6 +464,7 @@ class ChatProvider extends ChangeNotifier {
     required Contact contact,
     required Message userMessage,
     required String systemPrompt,
+    required String dynamicContext,
   }) async {
     AiServiceException? lastError;
     for (final profile in llmProfiles.where((profile) => profile.hasApiKey)) {
@@ -464,6 +474,7 @@ class ChatProvider extends ChangeNotifier {
           contactName: contact.name,
           userMessage: userMessage,
           systemPrompt: systemPrompt,
+          dynamicContext: dynamicContext,
           settings: _appSettings,
           profile: profile,
         ));
@@ -478,6 +489,7 @@ class ChatProvider extends ChangeNotifier {
     required Contact contact,
     required Message userMessage,
     required String systemPrompt,
+    required String dynamicContext,
   }) async* {
     AiServiceException? lastError;
     for (final profile in llmProfiles.where((profile) => profile.hasApiKey)) {
@@ -488,6 +500,7 @@ class ChatProvider extends ChangeNotifier {
           contactName: contact.name,
           userMessage: userMessage,
           systemPrompt: systemPrompt,
+          dynamicContext: dynamicContext,
           settings: _appSettings,
           profile: profile,
         )) {
@@ -1737,128 +1750,229 @@ class ChatProvider extends ChangeNotifier {
   }) async {
     if (naturalLanguage.trim().isEmpty) return null;
 
-    if (DateTime.now().microsecondsSinceEpoch >= 0) {
-      final typeLabel = isStory ? '故事' : '角色';
-      final systemPrompt = '''
-你是一个$typeLabel创建 JSON 格式化助手。
-请把用户的自然语言描述转换为创建对象用的 JSON，只输出 JSON，不要输出解释。
+    final typeLabel = isStory ? '故事' : '角色';
 
-必须包含字段：
-- name: $typeLabel名称，不能为空
-- avatar: 一个 emoji 或简短符号，可以为空字符串
-- fixedInput: 每轮对话固定输入给 LLM 的提示词
-- currentStates: 对象，key 是用户要求记录的状态名，value 初始为空字符串或描述中明确给出的初始值
+    String normalize(String rawJson) => rawJson.trim();
 
-不要输出 personality、appearance、backgroundStory、settings、status、mood、time 等旧预设字段。
-
-示例：
-{
-  "name": "$typeLabel名称",
-  "avatar": "★",
-  "fixedInput": "你是...",
-  "currentStates": {
-    "好感度": "",
-    "当前位置": ""
-  }
-}
-''';
-
+    Future<String?> parseOne(String response) async {
       try {
-        final response = await _repository.aiService.ask(
-          '$systemPrompt\n\n用户描述：\n$naturalLanguage',
-          contactId: 'system-nlp-to-json',
-          contactName: 'System',
-          profile: _providerSettings.llm,
-        );
-        final jsonStr = _extractJsonFromResponse(response);
-        if (jsonStr == null || jsonStr.isEmpty) return null;
-
-        final json = jsonDecode(jsonStr) as Map<String, dynamic>;
+        final extracted = _extractJsonFromResponse(response);
+        if (extracted == null || extracted.isEmpty) {
+          debugPrint('Failed to extract JSON from LLM response');
+          return null;
+        }
+        final json = jsonDecode(extracted) as Map<String, dynamic>;
         final name = (json['name'] ?? '').toString().trim();
-        if (name.isEmpty) return null;
-        return jsonStr;
+        final fixedInput = (json['fixedInput'] ?? '').toString().trim();
+        final personality = json['personality'];
+        final appearances = json['appearance'];
+        final currentStates = json['currentStates'];
+
+        final hasPersonality = personality is List && personality.isNotEmpty;
+        final hasAppearance = appearances is List && appearances.isNotEmpty;
+        final hasCurrentStates = currentStates is Map &&
+            currentStates.keys.every((k) => k.toString().isNotEmpty);
+
+        if (name.isEmpty) {
+          debugPrint('LLM generated JSON missing required fields (name)');
+          return null;
+        }
+        if (fixedInput.isEmpty || fixedInput.length < 40) {
+          debugPrint('LLM generated JSON fixedInput too short');
+          return null;
+        }
+        if (!hasPersonality && !hasAppearance) {
+          debugPrint('LLM generated JSON too sparse');
+          return null;
+        }
+        if (currentStates is Map &&
+            currentStates.isNotEmpty &&
+            !hasCurrentStates) {
+          debugPrint('LLM generated JSON invalid currentStates');
+          return null;
+        }
+        return normalize(extracted);
       } catch (e) {
-        debugPrint('convertNaturalLanguageToJson failed: $e');
+        debugPrint('convertNaturalLanguageToJson parse failed: $e');
         return null;
       }
     }
 
-    final systemPrompt = isStory
-        ? '''你是一个json格式化助手。请将用户的自然语言理解扩充后描述转换为标准的 JSON 格式。
-
-必须包含的字段：
-- id: 使用小写字母、数字和连字符，如 "story-001"
-- name: 故事名称
-
-可选字段（根据描述提取，没有则留空或空数组）：
-- avatar: 一个 emoji 或简短符号作为头像
-- personality: 故事风格标签数组，如 ["奇幻", "冒险"]
-- backgroundStory: 背景概述数组
-- settings: 故事设定数组，每个设定包含 key（设定名称）、value（设定描述）和 relate（关联关键词数组），如 [{"key":"魔法","value":"基于魔法石的能量","relate":["魔法石","能量"]},{"key":"魔法师","value":"能够激发魔法石的人","relate":["魔法","魔法石"]}]
-
-输出要求：
-1. 只输出纯 JSON，不要包含任何解释文字
-2. 如果描述中缺少某些信息，使用空字符串或空数组
-3. name 不能为空
-4. settings 中的 relate 字段用于关联搜索，应包含与设定相关的关键词
-5. 各个字段应该尽可能在不改变原意的前提下充实信息
-
-示例输出：
-{"id":"magic-world-001","name":"魔法大陆","avatar":"🏰","personality":["奇幻","冒险"],"backgroundStory":["一个充满魔法的世界","魔法石是能量的来源"],"settings":[{"key":"魔法","value":"这片大陆的魔法基于魔法石","relate":["魔法石","能量","法术"]},{"key":"魔法师","value":"能够激发魔法石能量的人","relate":["魔法","魔法石","施法者"]}]}
-'''
-        : '''你是一个角色创建助手。请将用户的自然语言描述转换为标准的 JSON 格式。
-
-必须包含的字段：
-- id: 使用小写字母、数字和连字符，如 "character-001"
-- name: 角色名称
-
-可选字段（根据描述提取，没有则留空或空数组）：
-- avatar: 一个 emoji 或简短符号作为头像
-- personality: 性格特点数组，如 ["理性", "冷静"]
-- appearance: 外貌特征数组，如 ["黑色外套", "短发"]
-- backgroundStory: 背景故事数组
-- worldKnowledge: 世界观知识数组
-- selfKnowledge: 自我认知数组
-- userKnowledge: 对用户的了解数组
-- belongings: 物品持有数组
-- status: 身体状态数组
-- mood: 当前情绪
-- time: 当前时间
-
-
-''';
-
     try {
-      // 使用 AI 服务进行转换
+      // 第 1 步：小型规划器（Plan）先抽取关键决策项，确保后续输出更聚焦。
+      final planPrompt = _buildNlRoleDraftPlanPrompt(
+        typeLabel: typeLabel,
+        naturalLanguage: naturalLanguage,
+      );
+      String? planText;
+      String? planJson;
+      try {
+        final planResponse = await _repository.aiService.ask(
+          '$planPrompt\n\n用户描述：\n$naturalLanguage',
+          contactId: 'system-nlp-to-json',
+          contactName: 'System',
+          profile: _providerSettings.llm,
+        );
+        planText = planResponse;
+        planJson = _extractJsonFromResponse(planResponse);
+      } catch (e) {
+        debugPrint('convertNaturalLanguageToJson plan stage failed: $e');
+      }
+
+      // 第 2 步：Draft 阶段，根据计划和原始描述输出目标 JSON。
+      final draftPrompt = _buildNlRoleDraftPrompt(
+        typeLabel: typeLabel,
+        naturalLanguage: naturalLanguage,
+        planJson: planJson ?? planText,
+      );
       final response = await _repository.aiService.ask(
-        '$systemPrompt\n\n用户描述：\n$naturalLanguage',
+        draftPrompt,
         contactId: 'system-nlp-to-json',
         contactName: 'System',
         profile: _providerSettings.llm,
       );
 
-      // 尝试从响应中提取 JSON
-      final jsonStr = _extractJsonFromResponse(response);
-      if (jsonStr == null || jsonStr.isEmpty) {
-        debugPrint('Failed to extract JSON from LLM response');
-        return null;
-      }
+      final parsed = await parseOne(response);
+      if (parsed != null) return parsed;
 
-      // 验证 JSON 是否有效
-      final json = jsonDecode(jsonStr) as Map<String, dynamic>;
-      final id = (json['id'] ?? '').toString().trim();
-      final name = (json['name'] ?? '').toString().trim();
+      // 第 3 步：若解析失败，进入 Repair 阶段做结构化修复（不改用户原始意图，只补齐格式）。
+      final repairPrompt = _buildNlRoleRepairPrompt(
+        typeLabel: typeLabel,
+        naturalLanguage: naturalLanguage,
+        planPreview: planText,
+        draftPreview: response,
+      );
+      final retryResponse = await _repository.aiService.ask(
+        repairPrompt,
+        contactId: 'system-nlp-to-json',
+        contactName: 'System',
+        profile: _providerSettings.llm,
+      );
 
-      if (id.isEmpty || name.isEmpty) {
-        debugPrint('LLM generated JSON missing required fields (id/name)');
-        return null;
-      }
-
-      return jsonStr;
+      return await parseOne(retryResponse);
     } catch (e) {
       debugPrint('convertNaturalLanguageToJson failed: $e');
       return null;
     }
+  }
+
+  String _buildNlRoleDraftPlanPrompt({
+    required String typeLabel,
+    required String naturalLanguage,
+  }) {
+    return '''
+你是$typeLabel创建 JSON 的规划器。请仅输出 JSON，不要解释。
+你的任务是从自然语言中提取结构化决策项，帮助后续稳定生成最终创建 JSON。
+
+{
+  "roleNameCandidates": ["候选1", "候选2"],
+  "fixedInputMustInclude": ["身份与关系", "行动风格", "边界", "可执行推进"],
+  "stateHints": ["建议默认状态1", "建议默认状态2"],
+  "styleHints": ["口吻/节奏/态度标签"],
+  "mustAvoid": ["过短句式", "不合理幻想扩写", "脱离输入"],
+  "seedKeywords": ["核心人物名", "核心场景", "核心物品"]
+}
+
+规则：
+- roleNameCandidates 至少一个，长度不为空。
+- fixedInputMustInclude 至少 2 项。
+- stateHints 至少 1 项。
+- styleHints 至少 1 项。
+- 字段名/数组名必须完全如上，JSON 不得额外包装说明文字。
+
+用户输入：
+$naturalLanguage
+''';
+  }
+
+  String _buildNlRoleDraftPrompt({
+    required String typeLabel,
+    required String naturalLanguage,
+    String? planJson,
+  }) {
+    final planSection =
+        planJson == null || planJson.trim().isEmpty ? '无可用计划' : planJson;
+    return '''
+你是$typeLabel创建 JSON 格式化助手，任务是将自然语言完整转为“创建对象 JSON”。
+请先充分理解描述中的世界观、人物关系、身份风格、行为边界，再输出结构化结果。
+请严格输出纯 JSON，不要包含任何解释，也不要 Markdown。
+
+上游规划信息（已归纳）：
+$planSection
+
+必须包含字段：
+- name: $typeLabel名称，不能为空
+- fixedInput: 每轮对话固定输入给 LLM 的提示词（不少于40字）
+- currentStates: 对象，key 是用户要求或可观察到的可持续状态名，value 为初始值/""（可以为空字符串）
+
+可选字段（建议返回，缺失可置空字符串或空数组）：
+- avatar: 一个 emoji 或简短符号
+- personality: 性格特征数组
+- appearance: 外貌特征数组
+- personalInfo: 身份/背景信息数组
+- backgroundStory: 背景故事数组
+- settings: 设定数组（每项含 key/value/relate）
+- narrativeRules: 叙事规则数组
+- otherCharacteristics: 其他特点数组
+- worldKnowledge: 世界观知识数组
+- selfKnowledge: 自我认知数组
+- userKnowledge: 对用户的认知数组
+- belongings: 物品数组
+- status: 身体状态数组
+- mood: 情绪字符串
+- time: 时间字符串
+- id: 建议值 "story-xxx" 或 "character-xxx"
+
+输出要求：
+1. 只输出 JSON，不要任何说明。
+2. fixedInput 不能为空，且避免“你是…”这种单薄写法。
+3. settings 的 relate 字段请补充相关关键词便于检索。
+4. 未提及的信息使用空值，不要编造世界设定。
+5. name 不能为空。
+6. fixedInput 200 字以内的描述请尽量扩展到可用上下文水平。
+
+用户输入：
+$naturalLanguage
+''';
+  }
+
+  String _buildNlRoleRepairPrompt({
+    required String typeLabel,
+    required String naturalLanguage,
+    String? planPreview,
+    String? draftPreview,
+  }) {
+    final planSection = planPreview == null || planPreview.trim().isEmpty
+        ? '无可用计划'
+        : planPreview;
+    final draftSection = draftPreview == null || draftPreview.trim().isEmpty
+        ? '无可用草稿'
+        : draftPreview;
+    return '''
+你是$typeLabel JSON 修复器。你只负责把已有输出修正为可直接落库的合法 JSON。
+请保留用户意图，不引入新故事线，不扩写原意。
+请只返回 JSON，不要任何解释，不要 Markdown。
+
+当前类型：$typeLabel
+原始输入：
+$naturalLanguage
+
+上游规划摘要：
+$planSection
+
+上一轮草稿：
+$draftSection
+
+修复规则（按优先级）：
+1. 必须有 name（非空）
+2. fixedInput 不能为空，且要有 >40 字，包含行为风格与边界
+3. personality 和 appearance 至少命中其中之一
+4. currentStates 如存在 key，要保证 key 非空
+5. output 只应是单个 JSON 对象，不要嵌套说明
+6. 严格 JSON 键名与目标 schema 匹配，能缺省则为空值
+
+请直接输出修复后的完整 JSON。
+''';
   }
 
   /// 从 LLM 响应中提取 JSON 字符串
@@ -2020,8 +2134,8 @@ class ChatProvider extends ChangeNotifier {
       final summarySourceTier = cascadeDecision.sourceTier;
       final pendingSummaryEvents = cascadeDecision.pendingEvents;
 
-      // 步骤3: 合并系统Prompt
-      final systemPrompt = _mergeSystemPromptWithContact(
+      // 步骤3: 拆分可缓存前缀与本轮动态上下文。
+      final promptSections = _mergeSystemPromptWithContact(
         basePrompt: _systemPrompt,
         contact: promptContact,
         needSummary: needSummary,
@@ -2031,9 +2145,10 @@ class ChatProvider extends ChangeNotifier {
       // 调试模式：显示召回路径和完整 Prompt（不记录费用）。
       if (isDebugMode) {
         final composer = StructuredInputPromptComposer(settings: _appSettings);
-        final structured = composer.composeStructuredOutputPrompt(
+        final structured = composer.composeStructuredOutputPromptParts(
           userInput: userMessage.content,
-          systemPrompt: systemPrompt,
+          systemPrompt: promptSections.cacheablePrefix,
+          dynamicContext: promptSections.dynamicContext,
           outputSchema: ChatRepository.outputSchema,
         );
         currentList.add(
@@ -2045,7 +2160,7 @@ class ChatProvider extends ChangeNotifier {
                 '额外 POST: ${recallOutcome.postCount}\n'
                 '结构化词项(JSON): ${jsonEncode(recallOutcome.activeTerms)}\n'
                 '事件节点(JSON): ${jsonEncode(recallOutcome.nodes.map((node) => node.id).toList())}\n\n'
-                '【调试信息】完整 Prompt\n$structured',
+                '【调试信息】完整 Prompt\n${structured.debugView}',
             createdAt: DateTime.now(),
           ),
         );
@@ -2053,7 +2168,7 @@ class ChatProvider extends ChangeNotifier {
       }
 
       // 步骤5: 发送AI请求
-      final Message reply;
+      Message reply;
       if (_providerSettings.llm.parameters.stream) {
         streamingMessageId =
             'assistant-${DateTime.now().microsecondsSinceEpoch}';
@@ -2063,7 +2178,8 @@ class ChatProvider extends ChangeNotifier {
           _streamRoleplayWithFallback(
             contact: selected,
             userMessage: userMessage,
-            systemPrompt: systemPrompt,
+            systemPrompt: promptSections.cacheablePrefix,
+            dynamicContext: promptSections.dynamicContext,
           ),
           (chunk) {
             raw.write(chunk);
@@ -2107,7 +2223,8 @@ class ChatProvider extends ChangeNotifier {
         reply = await _askRoleplayWithFallback(
           contact: selected,
           userMessage: userMessage,
-          systemPrompt: systemPrompt,
+          systemPrompt: promptSections.cacheablePrefix,
+          dynamicContext: promptSections.dynamicContext,
         );
       }
 
@@ -2115,12 +2232,30 @@ class ChatProvider extends ChangeNotifier {
       _updateMessageStatus(selected.id, userMessage.id, MessageStatus.sent);
 
       // 步骤6: 提取回复内容（从JSON中提取reply字段）
-      final String? replyContent =
-          StructuredOutputRegexParser.extractReply(reply.content) ??
-              // LLM 没返回标准 JSON（直接吐纯文本）时，AiService 已把整段当 reply
-              // 返回了，但这里 extractReply 还是解析不出 reply 字段，所以再退一步：
-              // 把 AiService 给的 content 整段当作可见内容展示，至少用户能看到 LLM 说啥
-              (reply.content.trim().isEmpty ? null : reply.content.trim());
+      String? replyContent = _extractReplyFromMessage(reply);
+
+      // 如果回复过短，补一轮“强制长回复”的重试，避免一次性只给一句话。
+      if (_isReplyContentTooShort(replyContent)) {
+        try {
+          final enforcedDynamicContext =
+              '${promptSections.dynamicContext}\n\n## 本轮重试要求\n'
+              '- 上一次正文过短。本轮 reply 是最终可见内容，请给出完整自然且具备铺垫的回复，按可读性估算至少可读 $_minReplyReadingSeconds 秒以上。'
+              '\n- 需围绕 eventBrief 逐步展开，不要只给一句“已知/明白”式回应。';
+          final retryReply = await _askRoleplayWithFallback(
+            contact: selected,
+            userMessage: userMessage,
+            systemPrompt: promptSections.cacheablePrefix,
+            dynamicContext: enforcedDynamicContext,
+          );
+          final retryContent = _extractReplyFromMessage(retryReply);
+          if (!_isReplyContentTooShort(retryContent)) {
+            reply = retryReply;
+            replyContent = retryContent;
+          }
+        } on AiServiceException {
+          // 重试失败时保留第一次响应，不阻断主流程
+        }
+      }
 
       // 检查是否成功提取到回复内容
       if (replyContent == null) {
@@ -2944,10 +3079,12 @@ class ChatProvider extends ChangeNotifier {
     required _PromptEventWindow hotWindow,
     required List<EventNode> relatedNodes,
   }) {
+    // 必须与 StructuredInputPromptComposer 中的编号展示顺序完全一致：
+    // 低频的历史/长期事件位于缓存前缀，短期事件位于动态尾部。
     final numberedNodes = <EventNode>[
-      ...hotWindow.short,
-      ...hotWindow.long,
       ...hotWindow.ultra,
+      ...hotWindow.long,
+      ...hotWindow.short,
     ];
     final numberedNodeIds = hotWindow.nodeIds.toSet();
     final related = relatedNodes
@@ -3077,17 +3214,47 @@ class ChatProvider extends ChangeNotifier {
   List<String> _firstN(List<String> items, int n) =>
       items.length <= n ? List<String>.from(items) : items.sublist(0, n);
 
+  bool _isReplyContentTooShort(String? reply) {
+    if (reply == null) return true;
+    final trimmed = reply.trim();
+    return trimmed.isEmpty ||
+        trimmed.length < _minReplyLengthFallbackChars ||
+        _estimateReadableSeconds(trimmed) < _minReplyReadingSeconds;
+  }
+
+  double _estimateReadableSeconds(String text) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return 0;
+
+    final chineseChars = RegExp(r'[\u4e00-\u9fff]').allMatches(trimmed).length;
+    final englishWords = RegExp(r"\b[A-Za-z']+\b").allMatches(trimmed).length;
+
+    final chineseSeconds = chineseChars / _readabilityChineseCharsPerSecond;
+    final englishSeconds = englishWords / _readabilityEnglishWordsPerSecond;
+    return chineseSeconds + englishSeconds;
+  }
+
+  String? _extractReplyFromMessage(Message message) {
+    return StructuredOutputRegexParser.extractReply(message.content) ??
+        (message.content.trim().isEmpty ? null : message.content.trim());
+  }
+
   /// 合并系统提示词和联系人信息
-  String _mergeSystemPromptWithContact({
+  ContactPromptSections _mergeSystemPromptWithContact({
     required String basePrompt,
     Contact? contact,
     bool needSummary = false,
     List<EventMemory> pendingSummaryEvents = const [],
   }) {
     final base = basePrompt.trim();
-    if (contact == null) return base;
+    if (contact == null) {
+      return ContactPromptSections(
+        cacheablePrefix: base,
+        dynamicContext: '',
+      );
+    }
     final composer = StructuredInputPromptComposer(settings: _appSettings);
-    return composer.composeSystemPromptWithContactObject(
+    return composer.composeSystemPromptSectionsWithContactObject(
       basePrompt: base,
       contact: contact,
       mustSummarize: needSummary,
@@ -3141,9 +3308,9 @@ class _PromptEventWindow {
     required this.long,
     required this.ultra,
   }) : nodeIds = List<String>.unmodifiable(<String>[
-          ...short.map((node) => node.id),
-          ...long.map((node) => node.id),
           ...ultra.map((node) => node.id),
+          ...long.map((node) => node.id),
+          ...short.map((node) => node.id),
         ]);
 
   final List<EventNode> short;
